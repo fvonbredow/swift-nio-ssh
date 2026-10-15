@@ -10,6 +10,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308),
+// legacy key exchanges and ciphers for older network equipment, strict key exchange.
+//
 //===----------------------------------------------------------------------===//
 
 // RSA keys, RSA signature algorithms (RFC 8332) and SSH_MSG_EXT_INFO (RFC 8308) — the NEOS
@@ -361,9 +364,12 @@ final class RSATests: XCTestCase {
         let server = SSHConnectionRole.server(
             .init(hostKeys: [.init(ed25519Key: .init())], userAuthDelegate: DenyAllServerAuthDelegate())
         )
-        XCTAssertEqual(kexInit(role: client, previous: nil).last, "ext-info-c")
-        XCTAssertFalse(kexInit(role: client, previous: ByteBuffer(bytes: [1, 2, 3])).contains("ext-info-c"))
+        XCTAssertEqual(kexInit(role: client, previous: nil).suffix(2), ["ext-info-c", "kex-strict-c-v00@openssh.com"])
+        let rekey = kexInit(role: client, previous: ByteBuffer(bytes: [1, 2, 3]))
+        XCTAssertFalse(rekey.contains("ext-info-c"))
+        XCTAssertFalse(rekey.contains("kex-strict-c-v00@openssh.com"))
         XCTAssertFalse(kexInit(role: server, previous: nil).contains("ext-info-c"))
+        XCTAssertEqual(kexInit(role: server, previous: nil).last, "kex-strict-s-v00@openssh.com")
     }
 
     func testKnownHostKeyTypesAreOfferedFirst() {

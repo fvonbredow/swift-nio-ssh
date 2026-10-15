@@ -95,6 +95,11 @@ struct SSHKeyExchangeStateMachine {
     private var protectionSchemes: [NIOSSHTransportProtection.Type]
     private var previousSessionIdentifier: ByteBuffer?
 
+    /// Both sides advertised OpenSSH's strict key exchange in the first key exchange. The
+    /// connection then resets packet sequence numbers at every NEWKEYS and tolerates nothing
+    /// but key exchange messages until the first one (see SSHConnectionStateMachine).
+    private(set) var strictKeyExchange = false
+
     init(
         allocator: ByteBufferAllocator,
         loop: EventLoop,
@@ -132,9 +137,16 @@ struct SSHKeyExchangeStateMachine {
         // RFC 8308: a client asks for SSH_MSG_EXT_INFO by listing this pseudo-algorithm, in
         // its first key exchange only. It is never negotiated — no server lists it — and
         // goes last so it cannot be mistaken for a guess.
-        var keyExchangeAlgorithms = Self.supportedKeyExchangeAlgorithms
-        if self.role.isClient, self.previousSessionIdentifier == nil {
-            keyExchangeAlgorithms.append(Self.extensionInfoClientIndicator)
+        var keyExchangeAlgorithms = self.keyExchangeAlgorithmNames
+        if self.previousSessionIdentifier == nil {
+            if self.role.isClient {
+                keyExchangeAlgorithms.append(Self.extensionInfoClientIndicator)
+            }
+            // OpenSSH's strict key exchange, against the Terrapin attack (CVE-2023-48795):
+            // advertised in the first key exchange only, in force if both sides do.
+            keyExchangeAlgorithms.append(
+                self.role.isClient ? Self.strictKeyExchangeClientIndicator : Self.strictKeyExchangeServerIndicator
+            )
         }
 
         return .init(
@@ -154,6 +166,14 @@ struct SSHKeyExchangeStateMachine {
     }
 
     mutating func handle(keyExchange message: SSHMessage.KeyExchangeMessage) throws -> SSHMultiMessage? {
+        if self.previousSessionIdentifier == nil {
+            let peerIndicator =
+                self.role.isClient ? Self.strictKeyExchangeServerIndicator : Self.strictKeyExchangeClientIndicator
+            if message.keyExchangeAlgorithms.contains(peerIndicator) {
+                self.strictKeyExchange = true
+            }
+        }
+
         switch self.state {
         case .keyExchangeSent(message: let ourMessage):
             switch self.role {
@@ -472,13 +492,13 @@ struct SSHKeyExchangeStateMachine {
 
         switch self.role {
         case .client:
-            clientAlgorithms = Self.supportedKeyExchangeAlgorithms
+            clientAlgorithms = self.keyExchangeAlgorithmNames
             serverAlgorithms = peerKeyExchangeAlgorithms
             clientHostKeyAlgorithms = self.supportedHostKeyAlgorithms
             serverHostKeyAlgorithms = peerHostKeyAlgorithms
         case .server:
             clientAlgorithms = peerKeyExchangeAlgorithms
-            serverAlgorithms = Self.supportedKeyExchangeAlgorithms
+            serverAlgorithms = self.keyExchangeAlgorithmNames
             clientHostKeyAlgorithms = peerHostKeyAlgorithms
             serverHostKeyAlgorithms = self.supportedHostKeyAlgorithms
         }
@@ -558,7 +578,7 @@ struct SSHKeyExchangeStateMachine {
     }
 
     private func exchangerForAlgorithm(_ algorithm: Substring) throws -> EllipticCurveKeyExchangeProtocol {
-        for implementation in Self.supportedKeyExchangeImplementations {
+        for implementation in self.keyExchangeImplementations {
             if implementation.keyExchangeAlgorithmNames.contains(algorithm) {
                 return implementation.init(
                     ourRole: self.role,
@@ -574,7 +594,7 @@ struct SSHKeyExchangeStateMachine {
     private func expectingIncorrectGuess(_ kexMessage: SSHMessage.KeyExchangeMessage) -> Bool {
         // A guess is wrong if the key exchange algorithm and/or the host key algorithm differ from our preference.
         kexMessage.firstKexPacketFollows
-            && (kexMessage.keyExchangeAlgorithms.first != Self.supportedKeyExchangeAlgorithms.first
+            && (kexMessage.keyExchangeAlgorithms.first != self.keyExchangeAlgorithmNames.first
                 || kexMessage.serverHostKeyAlgorithms.first != self.supportedHostKeyAlgorithms.first)
     }
 
@@ -609,16 +629,70 @@ struct SSHKeyExchangeStateMachine {
 }
 
 extension SSHKeyExchangeStateMachine {
-    // For now this is a static list.
+    /// Every key exchange implemented, in a client's order of preference: the curves, then
+    /// finite-field Diffie-Hellman from the strongest group down to the 1024-bit one that a
+    /// lot of old network equipment still offers alone.
     static let supportedKeyExchangeImplementations: [EllipticCurveKeyExchangeProtocol.Type] = [
         EllipticCurveKeyExchange<P384.KeyAgreement.PrivateKey>.self,
         EllipticCurveKeyExchange<P256.KeyAgreement.PrivateKey>.self,
         EllipticCurveKeyExchange<P521.KeyAgreement.PrivateKey>.self,
         EllipticCurveKeyExchange<Curve25519.KeyAgreement.PrivateKey>.self,
+        FiniteFieldDiffieHellman<DiffieHellmanGroup16SHA512>.self,
+        FiniteFieldDiffieHellman<DiffieHellmanGroup18SHA512>.self,
+        FiniteFieldDiffieHellman<DiffieHellmanGroup14SHA256>.self,
+        FiniteFieldDiffieHellman<DiffieHellmanGroup14SHA1>.self,
+        FiniteFieldDiffieHellman<DiffieHellmanGroup1SHA1>.self,
     ]
 
     static let supportedKeyExchangeAlgorithms: [Substring] = supportedKeyExchangeImplementations.flatMap {
         $0.keyExchangeAlgorithmNames
+    }
+
+    /// Offered by a client, which takes them only when a server has nothing better — but not
+    /// by a server unless it is configured to: SHA-1 exchange hashes and a 1024-bit group.
+    static let legacyKeyExchangeAlgorithms: Set<Substring> = [
+        "diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1",
+    ]
+
+    static let strictKeyExchangeClientIndicator: Substring = "kex-strict-c-v00@openssh.com"
+    static let strictKeyExchangeServerIndicator: Substring = "kex-strict-s-v00@openssh.com"
+
+    /// This side's key exchanges in order: as configured, or the role's default.
+    private var keyExchangeImplementations: [EllipticCurveKeyExchangeProtocol.Type] {
+        let configured: [String]?
+        switch self.role {
+        case .client(let configuration):
+            configured = configuration.keyExchangeAlgorithms
+        case .server(let configuration):
+            configured = configuration.keyExchangeAlgorithms
+        }
+        if let configured {
+            return configured.compactMap { name in
+                Self.supportedKeyExchangeImplementations.first { $0.keyExchangeAlgorithmNames.contains(Substring(name)) }
+            }
+        }
+        if self.role.isClient {
+            return Self.supportedKeyExchangeImplementations
+        }
+        return Self.supportedKeyExchangeImplementations.filter {
+            !$0.keyExchangeAlgorithmNames.contains(where: Self.legacyKeyExchangeAlgorithms.contains)
+        }
+    }
+
+    private var keyExchangeAlgorithmNames: [Substring] {
+        let configured: [String]?
+        switch self.role {
+        case .client(let configuration):
+            configured = configuration.keyExchangeAlgorithms
+        case .server(let configuration):
+            configured = configuration.keyExchangeAlgorithms
+        }
+        let names = self.keyExchangeImplementations.flatMap { $0.keyExchangeAlgorithmNames }
+        guard let configured else {
+            return names
+        }
+        // A configured list names exactly what is offered (curve25519 has two names).
+        return names.filter { configured.contains(String($0)) }
     }
 
     /// All known host key algorithms, in the order a client prefers them.

@@ -10,7 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308),
+// legacy key exchanges and ciphers for older network equipment, strict key exchange.
 //
 //===----------------------------------------------------------------------===//
 
@@ -61,6 +62,13 @@ public struct SSHClientConfiguration {
     /// exactly like a server whose key was swapped. Types this client does not support are
     /// ignored. Empty by default: the built-in order.
     public var preferredHostKeyTypes: [String] = []
+
+    /// The key exchange algorithms to offer, most preferred first, by their SSH names
+    /// (`curve25519-sha256`, `diffie-hellman-group14-sha256` …); unknown names are ignored.
+    /// nil offers the default: everything for a client — the legacy ones last, taken only
+    /// when a server has nothing else — and everything but SHA-1 and 1024-bit Diffie-Hellman
+    /// for a server.
+    public var keyExchangeAlgorithms: [String]? = nil
 
     public init(
         userAuthDelegate: NIOSSHClientUserAuthenticationDelegate,

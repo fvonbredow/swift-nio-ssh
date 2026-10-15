@@ -33,6 +33,10 @@ extension SSHConnectionStateMachine {
         /// The backing state machine.
         var keyExchangeStateMachine: SSHKeyExchangeStateMachine
 
+        /// Something other than KEXINIT arrived before the peer's KEXINIT. Under strict key
+        /// exchange that ends the connection once the KEXINIT says strict is in force.
+        var receivedOtherMessageBeforeKeyExchange = false
+
         init(
             sentVersionState state: SentVersionState,
             allocator: ByteBufferAllocator,

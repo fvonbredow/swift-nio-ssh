@@ -10,6 +10,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308),
+// legacy key exchanges and ciphers for older network equipment, strict key exchange.
+//
 //===----------------------------------------------------------------------===//
 
 import NIOCore
@@ -40,6 +43,22 @@ struct SSHPacketParser {
     private var buffer: ByteBuffer
     private var state: State
     private(set) var sequenceNumber: UInt32
+
+    /// Strict key exchange (Terrapin countermeasure): the sequence number restarts at zero
+    /// after every NEWKEYS received.
+    private(set) var usesStrictKeyExchange = false
+
+    mutating func useStrictKeyExchange() {
+        self.usesStrictKeyExchange = true
+    }
+
+    private mutating func advanceSequenceNumber(after message: SSHMessage) {
+        if self.usesStrictKeyExchange, case .newKeys = message {
+            self.sequenceNumber = 0
+        } else {
+            self.sequenceNumber &+= 1
+        }
+    }
 
     /// The maximum length of an encrypted packet, i.e. its `packet_length` field once key exchange
     /// has completed. This is the connection's configured maximum channel packet size plus headroom
@@ -114,7 +133,7 @@ struct SSHPacketParser {
             if let length = self.buffer.getInteger(at: self.buffer.readerIndex, as: UInt32.self) {
                 if let message = try self.parsePlaintext(length: length) {
                     self.state = .cleartextWaitingForLength
-                    self.sequenceNumber &+= 1
+                    self.advanceSequenceNumber(after: message)
                     return message
                 }
                 self.state = .cleartextWaitingForBytes(length)
@@ -124,7 +143,7 @@ struct SSHPacketParser {
         case .cleartextWaitingForBytes(let length):
             if let message = try self.parsePlaintext(length: length) {
                 self.state = .cleartextWaitingForLength
-                self.sequenceNumber &+= 1
+                self.advanceSequenceNumber(after: message)
                 return message
             }
             return nil
@@ -135,7 +154,7 @@ struct SSHPacketParser {
 
             if let message = try self.parseCiphertext(length: length, protection: protection) {
                 self.state = .encryptedWaitingForLength(protection)
-                self.sequenceNumber &+= 1
+                self.advanceSequenceNumber(after: message)
                 return message
             }
             self.state = .encryptedWaitingForBytes(length, protection)
@@ -143,7 +162,7 @@ struct SSHPacketParser {
         case .encryptedWaitingForBytes(let length, let protection):
             if let message = try self.parseCiphertext(length: length, protection: protection) {
                 self.state = .encryptedWaitingForLength(protection)
-                self.sequenceNumber &+= 1
+                self.advanceSequenceNumber(after: message)
                 return message
             }
             return nil

@@ -10,6 +10,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308),
+// legacy key exchanges and ciphers for older network equipment, strict key exchange.
+//
 //===----------------------------------------------------------------------===//
 
 import NIOCore
@@ -23,6 +26,22 @@ struct SSHPacketSerializer {
 
     private var state: State = .initialized
     private(set) var sequenceNumber: UInt32 = 0
+
+    /// Strict key exchange (Terrapin countermeasure): the sequence number restarts at zero
+    /// after every NEWKEYS this side sends.
+    private(set) var usesStrictKeyExchange = false
+
+    mutating func useStrictKeyExchange() {
+        self.usesStrictKeyExchange = true
+    }
+
+    private mutating func advanceSequenceNumber(after message: SSHMessage) {
+        if self.usesStrictKeyExchange, case .newKeys = message {
+            self.sequenceNumber = 0
+        } else {
+            self.sequenceNumber &+= 1
+        }
+    }
 
     /// Encryption schemes can be added to a packet serializer whenever encryption is negotiated.
     mutating func addEncryption(_ protection: NIOSSHTransportProtection) {
@@ -48,7 +67,7 @@ struct SSHPacketSerializer {
             }
         case .cleartext:
             buffer.writeSSHPacket(message: message, lengthEncrypted: true, blockSize: 8)
-            self.sequenceNumber &+= 1
+            self.advanceSequenceNumber(after: message)
         case .encrypted(let protection):
             let index = buffer.readerIndex
             buffer.moveReaderIndex(to: buffer.writerIndex)
@@ -59,7 +78,7 @@ struct SSHPacketSerializer {
             )
             try protection.encryptPacket(&buffer, sequenceNumber: self.sequenceNumber)
             buffer.moveReaderIndex(to: index)
-            self.sequenceNumber &+= 1
+            self.advanceSequenceNumber(after: message)
         }
     }
 }

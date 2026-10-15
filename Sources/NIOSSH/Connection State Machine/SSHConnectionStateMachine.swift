@@ -155,6 +155,18 @@ struct SSHConnectionStateMachine {
                     switch message {
                     case .keyExchange(let message):
                         let result = try state.receiveKeyExchangeMessage(message)
+                        if state.keyExchangeStateMachine.strictKeyExchange {
+                            // Strict key exchange: the peer's KEXINIT must have been the first
+                            // packet, and both directions restart their count at NEWKEYS.
+                            guard !state.receivedOtherMessageBeforeKeyExchange else {
+                                throw NIOSSHError.protocolViolation(
+                                    protocolName: "strict key exchange",
+                                    violation: "KEXINIT was not the first packet"
+                                )
+                            }
+                            state.parser.useStrictKeyExchange()
+                            state.serializer.useStrictKeyExchange()
+                        }
                         self = .keyExchange(state)
                         return result
                     case .keyExchangeInit(let message):
@@ -173,7 +185,16 @@ struct SSHConnectionStateMachine {
                         self = .receivedDisconnect(state.role)
                         return .disconnect
                     case .ignore, .debug, .extensionInfo:
-                        // Ignore these
+                        // Under strict key exchange nothing else may arrive before the first
+                        // NEWKEYS — that is what stops an attacker from shifting the sequence
+                        // numbers (Terrapin).
+                        if state.parser.usesStrictKeyExchange {
+                            throw NIOSSHError.protocolViolation(
+                                protocolName: "strict key exchange",
+                                violation: "unexpected \(message) during the initial key exchange"
+                            )
+                        }
+                        state.receivedOtherMessageBeforeKeyExchange = true
                         self = .keyExchange(state)
                         return .noMessage
                     case .unimplemented(let unimplemented):
@@ -232,7 +253,13 @@ struct SSHConnectionStateMachine {
                         self = .receivedDisconnect(state.role)
                         return .disconnect
                     case .ignore, .debug, .extensionInfo:
-                        // Ignore these
+                        // Still the initial key exchange until the peer's NEWKEYS.
+                        if state.parser.usesStrictKeyExchange {
+                            throw NIOSSHError.protocolViolation(
+                                protocolName: "strict key exchange",
+                                violation: "unexpected \(message) during the initial key exchange"
+                            )
+                        }
                         self = .sentNewKeys(state)
                         return .noMessage
                     case .unimplemented(let unimplemented):
