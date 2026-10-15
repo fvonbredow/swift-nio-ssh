@@ -581,8 +581,8 @@ struct SSHKeyExchangeStateMachine {
     // The host key algorithms supported by this peer, in order of preference.
     private var supportedHostKeyAlgorithms: [Substring] {
         switch self.role {
-        case .client:
-            return Self.supportedServerHostKeyAlgorithms
+        case .client(let configuration):
+            return Self.hostKeyAlgorithms(preferring: configuration.preferredHostKeyTypes)
         case .server(let configuration):
             return configuration.hostKeys.flatMap { $0.hostKeyAlgorithms }
         }
@@ -630,6 +630,23 @@ extension SSHKeyExchangeStateMachine {
         "ssh-ed25519", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp521",
         "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa",
     ]
+
+    /// The client's host key algorithms with those of the preferred key types first, in the
+    /// order given; the rest keep their built-in order.
+    static func hostKeyAlgorithms(preferring keyTypes: [String]) -> [Substring] {
+        guard !keyTypes.isEmpty else {
+            return Self.supportedServerHostKeyAlgorithms
+        }
+        var preferred: [Substring] = []
+        for keyType in keyTypes {
+            let algorithms: [Substring] =
+                keyType == "ssh-rsa"
+                ? Self.supportedServerHostKeyAlgorithms.filter { RSASignatureAlgorithm(name: $0.utf8) != nil }
+                : Self.supportedServerHostKeyAlgorithms.filter { $0 == keyType }
+            preferred += algorithms.filter { !preferred.contains($0) }
+        }
+        return preferred + Self.supportedServerHostKeyAlgorithms.filter { !preferred.contains($0) }
+    }
 
     /// RFC 8308's request for SSH_MSG_EXT_INFO.
     static let extensionInfoClientIndicator: Substring = "ext-info-c"

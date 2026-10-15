@@ -198,6 +198,15 @@ struct RSAPrivateKey: @unchecked Sendable {
         let (n, e) = try RSADER.parsePublicKey(Array(der))
         self.publicKey = try RSAPublicKeyComponents(modulus: n, publicExponent: e)
         self.secKey = secKey
+
+        // A key whose numbers disagree — a damaged file, a hand-edited one — imports
+        // without complaint and then signs garbage. Better to say so here than to let the
+        // server answer "permission denied" for it.
+        let probe = Array("NIOSSH RSA consistency check".utf8)
+        let signature = try self.signature(for: probe, algorithm: .sha256)
+        guard self.publicKey.isValidSignature(signature, for: probe) else {
+            throw NIOSSHError.invalidRSAKey(reason: "the key's numbers do not belong together")
+        }
     }
     #endif
 
@@ -263,15 +272,9 @@ extension RSAPrivateKey {
                 + RSADER.integer(exponent2)
                 + RSADER.integer(coefficient)
         )
+        // Imported keys are checked for consistency on the way in (init(secKey:)).
         try self.init(pkcs1DER: der)
-
-        // The file may disagree with itself — a damaged key, a hand-edited one. Better to
-        // say so here than to let the server answer "permission denied" for it.
-        let probe = Array("NIOSSH RSA consistency check".utf8)
-        let signature = try self.signature(for: probe, algorithm: .sha256)
-        guard self.publicKey.isValidSignature(signature, for: probe),
-            self.publicKey.modulus == Array(modulus.drop(while: { $0 == 0 }))
-        else {
+        guard self.publicKey.modulus == Array(modulus.drop(while: { $0 == 0 })) else {
             throw NIOSSHError.invalidRSAKey(reason: "the key's numbers do not belong together")
         }
     }

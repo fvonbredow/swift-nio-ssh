@@ -25,6 +25,12 @@ Licensed, like the original, under the Apache License 2.0; modified files say so
   then `ssh-rsa`, each only after the previous one was refused — at most two extra refusals,
   and only for an RSA key on such a server.
 
+- **Known host key types first**: `SSHClientConfiguration.preferredHostKeyTypes` moves the
+  algorithms of the given key types to the front of what the client offers — pass the types
+  known for the server, as OpenSSH does with known_hosts. A server that has an RSA key known
+  from before and an Ed25519 key added since then keeps being asked for the RSA one, instead
+  of looking like a server whose key was swapped.
+
 ## How
 
 RSA arithmetic is the Security framework's (`SecKey`), so nothing new is linked on Apple

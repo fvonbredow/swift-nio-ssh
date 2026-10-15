@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 /// Configuration for an SSH client.
@@ -49,6 +51,16 @@ public struct SSHClientConfiguration {
             )
         }
     }
+
+    /// Host key types to prefer, most preferred first: `ssh-ed25519`, `ecdsa-sha2-nistp256`,
+    /// `ssh-rsa` … Their host key algorithms move to the front of the list the client offers.
+    ///
+    /// Pass the types already known for this server, as OpenSSH does with its known_hosts.
+    /// Otherwise a server that has several host keys — an RSA one known from before, an
+    /// Ed25519 one added since — would be asked for the one nobody has seen yet, and look
+    /// exactly like a server whose key was swapped. Types this client does not support are
+    /// ignored. Empty by default: the built-in order.
+    public var preferredHostKeyTypes: [String] = []
 
     public init(
         userAuthDelegate: NIOSSHClientUserAuthenticationDelegate,

@@ -366,6 +366,49 @@ final class RSATests: XCTestCase {
         XCTAssertFalse(kexInit(role: server, previous: nil).contains("ext-info-c"))
     }
 
+    func testKnownHostKeyTypesAreOfferedFirst() {
+        XCTAssertEqual(
+            SSHKeyExchangeStateMachine.hostKeyAlgorithms(preferring: []),
+            SSHKeyExchangeStateMachine.supportedServerHostKeyAlgorithms
+        )
+        XCTAssertEqual(
+            SSHKeyExchangeStateMachine.hostKeyAlgorithms(preferring: ["ssh-rsa"]),
+            [
+                "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa",
+                "ssh-ed25519", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp521",
+            ]
+        )
+        XCTAssertEqual(
+            Array(SSHKeyExchangeStateMachine.hostKeyAlgorithms(preferring: ["ecdsa-sha2-nistp256", "x-unknown"]).prefix(2)),
+            ["ecdsa-sha2-nistp256", "ssh-ed25519"]
+        )
+    }
+
+    func testAKnownRSAHostKeyStaysChosenWhenTheServerAlsoHasEd25519() throws {
+        let channel = BackToBackEmbeddedChannel()
+        defer { try? channel.finish() }
+
+        final class RecordingHostKeyDelegate: NIOSSHClientServerAuthenticationDelegate {
+            var seen: NIOSSHPublicKey?
+            func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+                self.seen = hostKey
+                validationCompletePromise.succeed(())
+            }
+        }
+        let hostKeys = RecordingHostKeyDelegate()
+        let rsa = try NIOSSHPrivateKey(rsaKey: RSAFixture.secKey)
+
+        var harness = TestHarness()
+        harness.serverHostKeys = [NIOSSHPrivateKey(ed25519Key: .init()), rsa]
+        harness.clientServerAuthDelegate = hostKeys
+        harness.clientPreferredHostKeyTypes = ["ssh-rsa"]
+
+        XCTAssertNoThrow(try channel.configureWithHarness(harness))
+        XCTAssertNoThrow(try channel.activate())
+        XCTAssertNoThrow(try channel.interactInMemory())
+        XCTAssertEqual(hostKeys.seen, rsa.publicKey)
+    }
+
     // MARK: Client flow
 
     /// Offers one RSA key, then nothing.

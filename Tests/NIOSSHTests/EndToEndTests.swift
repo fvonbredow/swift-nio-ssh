@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 import Crypto
@@ -82,14 +84,14 @@ class BackToBackEmbeddedChannel {
     }
 
     func configureWithHarness(_ harness: TestHarness) throws {
+        var clientConfiguration = SSHClientConfiguration(
+            userAuthDelegate: harness.clientAuthDelegate,
+            serverAuthDelegate: harness.clientServerAuthDelegate,
+            globalRequestDelegate: harness.clientGlobalRequestDelegate
+        )
+        clientConfiguration.preferredHostKeyTypes = harness.clientPreferredHostKeyTypes
         let clientHandler = NIOSSHHandler(
-            role: .client(
-                .init(
-                    userAuthDelegate: harness.clientAuthDelegate,
-                    serverAuthDelegate: harness.clientServerAuthDelegate,
-                    globalRequestDelegate: harness.clientGlobalRequestDelegate
-                )
-            ),
+            role: .client(clientConfiguration),
             allocator: self.client.allocator,
             inboundChildChannelInitializer: nil
         )
@@ -153,6 +155,8 @@ struct TestHarness {
     var serverHostKeys: [NIOSSHPrivateKey] = [.init(ed25519Key: .init())]
 
     var serverAuthBanner: SSHServerConfiguration.UserAuthBanner?
+
+    var clientPreferredHostKeyTypes: [String] = []
 }
 
 final class UserEventExpecter: ChannelInboundHandler {
