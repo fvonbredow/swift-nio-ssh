@@ -10,6 +10,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): see NEOS-FORK.md — RSA and DSA keys, legacy key exchanges and
+// ciphers, strict key exchange, keyboard-interactive, external signers (ssh-agent).
+//
 //===----------------------------------------------------------------------===//
 
 public enum Constants: Sendable {

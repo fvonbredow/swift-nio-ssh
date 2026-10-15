@@ -10,7 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+// Modified for NEOS (2026): see NEOS-FORK.md — RSA and DSA keys, legacy key exchanges and
+// ciphers, strict key exchange, keyboard-interactive, external signers (ssh-agent).
 //
 //===----------------------------------------------------------------------===//
 import NIOCore
@@ -322,6 +323,47 @@ extension NIOSSHUserAuthenticationOffer.Offer {
 }
 
 extension SSHMessage.UserAuthRequestMessage {
+    /// The request for an offer, signed whichever way its key signs: here and now, or — for
+    /// an external key such as one in an ssh-agent — when the signer answers (NEOS fork).
+    static func make(
+        request: NIOSSHUserAuthenticationOffer,
+        sessionID: ByteBuffer,
+        rsaSignatureAlgorithm: RSASignatureAlgorithm?,
+        on loop: EventLoop
+    ) -> EventLoopFuture<SSHMessage.UserAuthRequestMessage> {
+        guard case .privateKey(let offer) = request.offer, case .external(let box) = offer.privateKey.backingKey else {
+            return loop.makeCompletedFuture {
+                try SSHMessage.UserAuthRequestMessage(
+                    request: request,
+                    sessionID: sessionID,
+                    rsaSignatureAlgorithm: rsaSignatureAlgorithm
+                )
+            }
+        }
+        let service = "ssh-connection"
+        let payload = UserAuthSignablePayload(
+            sessionIdentifier: sessionID,
+            userName: request.username,
+            serviceName: service,
+            publicKey: offer.publicKey,
+            rsaSignatureAlgorithm: rsaSignatureAlgorithm
+        )
+        let algorithm = payload.rsaSignatureAlgorithm?.rawValue ?? String(offer.publicKey.keyPrefix)
+        return box.signer.sign(Array(payload.bytes.readableBytesView), algorithm: algorithm, eventLoop: loop)
+            .flatMapThrowing { signature in
+                // An agent that signed with another algorithm than asked would get the
+                // request refused for a reason nobody could see; better to say so here.
+                guard signature.algorithmName.elementsEqual(algorithm.utf8) else {
+                    throw NIOSSHError.invalidUserAuthSignature
+                }
+                return SSHMessage.UserAuthRequestMessage(
+                    username: request.username,
+                    service: service,
+                    method: .publicKey(.known(key: offer.publicKey, signature: signature))
+                )
+            }
+    }
+
     /// - parameters:
     ///     - rsaSignatureAlgorithm: How an RSA key signs this request; ignored for other keys.
     init(

@@ -10,7 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+// Modified for NEOS (2026): see NEOS-FORK.md — RSA and DSA keys, legacy key exchanges and
+// ciphers, strict key exchange, keyboard-interactive, external signers (ssh-agent).
 //
 //===----------------------------------------------------------------------===//
 
@@ -63,6 +64,12 @@ public struct NIOSSHPrivateKey: Sendable {
         self.backingKey = .secureEnclaveP256(key)
     }
     #endif
+
+    /// A key that is not in this process — in an ssh-agent, say — and signs on request
+    /// (NEOS fork). Usable for user authentication only, not as a host key.
+    public init(externalSigner: NIOSSHExternalSigner) {
+        self.backingKey = .external(ExternalSignerBox(signer: externalSigner))
+    }
 
     #if canImport(Security)
     /// An RSA key held by the Security framework.
@@ -124,6 +131,8 @@ public struct NIOSSHPrivateKey: Sendable {
         case .rsa:
             // Not `ssh-rsa`: a server has no reason to offer SHA-1 signatures.
             return ["rsa-sha2-512", "rsa-sha2-256"]
+        case .external:
+            return []
         }
     }
 }
@@ -141,7 +150,25 @@ extension NIOSSHPrivateKey {
         #endif
 
         case rsa(RSAPrivateKey)
+
+        case external(ExternalSignerBox)
     }
+}
+
+/// A key that lives elsewhere and signs on request (NEOS fork): an ssh-agent, a token.
+public protocol NIOSSHExternalSigner: Sendable {
+    /// The public half, as the server will be shown it.
+    var publicKey: NIOSSHPublicKey { get }
+
+    /// Signs `data` with the SSH signature algorithm named — the key type for most keys;
+    /// `rsa-sha2-512`, `rsa-sha2-256` or `ssh-rsa` for an RSA key — and completes with the
+    /// signature, e.g. from ``NIOSSHSignature/init(sshSignatureBlob:)``. May take its time:
+    /// an agent can ask its user first.
+    func sign(_ data: [UInt8], algorithm: String, eventLoop: EventLoop) -> EventLoopFuture<NIOSSHSignature>
+}
+
+struct ExternalSignerBox: Sendable {
+    let signer: NIOSSHExternalSigner
 }
 
 extension NIOSSHPrivateKey {
@@ -181,6 +208,8 @@ extension NIOSSHPrivateKey {
         case .rsa(let key):
             let algorithm = hostKeyAlgorithm.flatMap { RSASignatureAlgorithm(name: $0.utf8) } ?? .sha512
             return NIOSSHSignature(backingSignature: .rsa(try key.signature(for: Array(digest), algorithm: algorithm)))
+        case .external:
+            throw NIOSSHError.protocolViolation(protocolName: "key exchange", violation: "an external key is no host key")
         }
     }
 
@@ -211,6 +240,9 @@ extension NIOSSHPrivateKey {
                 algorithm: payload.rsaSignatureAlgorithm ?? .sha512
             )
             return NIOSSHSignature(backingSignature: .rsa(signature))
+        case .external:
+            // Signs asynchronously; see SSHMessage.UserAuthRequestMessage.make.
+            throw NIOSSHError.protocolViolation(protocolName: "user auth", violation: "external keys sign asynchronously")
         }
     }
 }
@@ -233,6 +265,8 @@ extension NIOSSHPrivateKey {
         #endif
         case .rsa(let privateKey):
             return NIOSSHPublicKey(backingKey: .rsa(privateKey.publicKey))
+        case .external(let box):
+            return box.signer.publicKey
         }
     }
 }

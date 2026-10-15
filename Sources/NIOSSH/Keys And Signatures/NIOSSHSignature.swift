@@ -10,7 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+// Modified for NEOS (2026): see NEOS-FORK.md — RSA and DSA keys, legacy key exchanges and
+// ciphers, strict key exchange, keyboard-interactive, external signers (ssh-agent).
 //
 //===----------------------------------------------------------------------===//
 
@@ -28,6 +29,17 @@ public struct NIOSSHSignature: Hashable, Sendable {
 
     internal init(backingSignature: BackingSignature) {
         self.backingSignature = backingSignature
+    }
+
+    /// A signature in SSH wire form — `string algorithm, string signature` — as an
+    /// ssh-agent returns it (NEOS fork).
+    public init<Bytes: Collection>(sshSignatureBlob blob: Bytes) throws where Bytes.Element == UInt8 {
+        var buffer = ByteBuffer()
+        buffer.writeBytes(Array(blob))
+        guard let signature = try buffer.readSSHSignature(), buffer.readableBytes == 0 else {
+            throw NIOSSHError.invalidSSHMessage(reason: "not an SSH signature")
+        }
+        self = signature
     }
 }
 

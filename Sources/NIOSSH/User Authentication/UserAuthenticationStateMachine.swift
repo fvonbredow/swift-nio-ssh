@@ -10,7 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+// Modified for NEOS (2026): see NEOS-FORK.md — RSA and DSA keys, legacy key exchanges and
+// ciphers, strict key exchange, keyboard-interactive, external signers (ssh-agent).
 //
 //===----------------------------------------------------------------------===//
 
@@ -584,16 +585,12 @@ extension UserAuthenticationStateMachine {
         // a server that did not say which it accepts gets the next one before the delegate
         // is asked for anything else. Not after a partial success — that refusal was not one.
         if !partialSuccess, methods.contains(.publicKey), let (offer, algorithm) = negotiation.nextRetry() {
-            do {
-                let message = try SSHMessage.UserAuthRequestMessage(
-                    request: offer,
-                    sessionID: self.sessionID,
-                    rsaSignatureAlgorithm: algorithm
-                )
-                return self.loop.makeSucceededFuture(message)
-            } catch {
-                return self.loop.makeFailedFuture(error)
-            }
+            return SSHMessage.UserAuthRequestMessage.make(
+                request: offer,
+                sessionID: self.sessionID,
+                rsaSignatureAlgorithm: algorithm,
+                on: self.loop
+            ).map(Optional.some)
         }
         negotiation.abandonRetry()
 
@@ -601,15 +598,17 @@ extension UserAuthenticationStateMachine {
         delegate.nextAuthenticationType(availableMethods: methods, nextChallengePromise: promise)
 
         // The explicit capture list is here to force a copy of the buffer, rather than capturing self.
-        return promise.futureResult.flatMapThrowing { [sessionID = self.sessionID] request in
-            try request.map { offer in
-                let algorithm = negotiation.firstAlgorithm(for: offer)
-                return try SSHMessage.UserAuthRequestMessage(
-                    request: offer,
-                    sessionID: sessionID,
-                    rsaSignatureAlgorithm: algorithm
-                )
+        return promise.futureResult.flatMap { [sessionID = self.sessionID, loop = self.loop] request in
+            guard let offer = request else {
+                return loop.makeSucceededFuture(nil)
             }
+            let algorithm = negotiation.firstAlgorithm(for: offer)
+            return SSHMessage.UserAuthRequestMessage.make(
+                request: offer,
+                sessionID: sessionID,
+                rsaSignatureAlgorithm: algorithm,
+                on: loop
+            ).map(Optional.some)
         }
     }
 }
