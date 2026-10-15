@@ -31,6 +31,12 @@ public final class NIOSSHHandler {
     /// The state machine that drives the connection.
     private var stateMachine: SSHConnectionStateMachine
 
+    /// What the latest key exchange on this connection settled on; nil before the first has
+    /// completed (NEOS fork). Read it on the channel's event loop.
+    public var negotiatedAlgorithms: NIOSSHNegotiatedAlgorithms? {
+        self.stateMachine.negotiatedAlgorithms
+    }
+
     /// A buffer used to provide scratch space for writing data to the network.
     ///
     /// This is an IUO because it should never be nil, but it is only initialized once the

@@ -126,6 +126,38 @@ final class CipherMACTransportProtectionTests: XCTestCase {
         }
     }
 
+    func testTheNegotiatedAlgorithmsAreReported() throws {
+        let channel = BackToBackEmbeddedChannel()
+        defer { try? channel.finish() }
+        var harness = TestHarness()
+        harness.clientKeyExchangeAlgorithms = ["diffie-hellman-group14-sha1"]
+        harness.serverKeyExchangeAlgorithms = ["diffie-hellman-group14-sha1"]
+        harness.serverTransportProtectionSchemes = [CipherMACTransportProtection<AES128CBC, HMACSHA1>.self]
+        XCTAssertNoThrow(try channel.configureWithHarness(harness))
+        XCTAssertNil(channel.clientSSHHandler?.negotiatedAlgorithms)
+        let events = UserEventExpecter()
+        XCTAssertNoThrow(try channel.client.pipeline.syncOperations.addHandler(events))
+        XCTAssertNoThrow(try channel.activate())
+        XCTAssertNoThrow(try channel.interactInMemory())
+
+        let expected = NIOSSHNegotiatedAlgorithms(
+            keyExchange: "diffie-hellman-group14-sha1",
+            hostKey: "ssh-ed25519",
+            cipher: "aes128-cbc",
+            mac: "hmac-sha1",
+            strictKeyExchange: true
+        )
+        XCTAssertEqual(channel.clientSSHHandler?.negotiatedAlgorithms, expected)
+        XCTAssertEqual(channel.serverSSHHandler?.negotiatedAlgorithms, expected)
+        // Kept off the event stream: code waiting for the first event after the handshake
+        // must not get something new first.
+        XCTAssertFalse(events.userEvents.contains { $0 is NIOSSHNegotiatedAlgorithms })
+
+        XCTAssertNoThrow(try channel.clientSSHHandler!._rekey())
+        XCTAssertNoThrow(try channel.interactInMemory())
+        XCTAssertEqual(channel.clientSSHHandler?.negotiatedAlgorithms, expected)
+    }
+
     func testAClientOffersLegacyLastAndAServerNotAtAll() {
         let client = Constants.clientTransportProtectionSchemes.map { "\($0.cipherName)/\($0.macName ?? "-")" }
         let server = Constants.bundledTransportProtectionSchemes.map { "\($0.cipherName)/\($0.macName ?? "-")" }

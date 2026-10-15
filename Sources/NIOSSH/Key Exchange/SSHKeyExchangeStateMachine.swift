@@ -444,13 +444,29 @@ struct SSHKeyExchangeStateMachine {
     }
 
     mutating func handleNewKeys() throws -> NIOSSHTransportProtection {
+        try self.handleNewKeysReportingAlgorithms().protection
+    }
+
+    /// The peer's NEWKEYS, and what this key exchange settled on (NEOS fork).
+    mutating func handleNewKeysReportingAlgorithms() throws -> (
+        protection: NIOSSHTransportProtection, algorithms: NIOSSHNegotiatedAlgorithms
+    ) {
+        func report(_ negotiated: NegotiationResult) -> NIOSSHNegotiatedAlgorithms {
+            NIOSSHNegotiatedAlgorithms(
+                keyExchange: String(negotiated.negotiatedKeyExchangeAlgorithm),
+                hostKey: String(negotiated.negotiatedHostKeyAlgorithm),
+                cipher: negotiated.negotiatedProtection.cipherName,
+                mac: negotiated.negotiatedProtection.macName,
+                strictKeyExchange: self.strictKeyExchange
+            )
+        }
         switch self.state {
         case .keysExchanged(let result, let protection, let negotiated):
             self.state = .newKeysReceived(result: result, protection: protection, negotiated: negotiated)
-            return protection
-        case .newKeysSent(let result, let protection, _):
+            return (protection, report(negotiated))
+        case .newKeysSent(let result, let protection, let negotiated):
             self.state = .complete(result: result)
-            return protection
+            return (protection, report(negotiated))
         case .idle, .keyExchangeSent, .keyExchangeReceived, .awaitingKeyExchangeInit,
             .awaitingKeyExchangeInitInvalidGuess, .keyExchangeInitSent, .keyExchangeInitReceived, .newKeysReceived,
             .complete:

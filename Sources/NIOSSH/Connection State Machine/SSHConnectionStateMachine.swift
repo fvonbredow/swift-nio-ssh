@@ -182,9 +182,9 @@ struct SSHConnectionStateMachine {
                         self = .keyExchange(state)
                         return result
                     case .newKeys:
-                        try state.receiveNewKeysMessage()
+                        let algorithms = try state.receiveNewKeysMessage()
                         self = .receivedNewKeys(.init(keyExchangeState: state, loop: loop))
-                        return .noMessage
+                        return .event(algorithms)
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
@@ -254,9 +254,9 @@ struct SSHConnectionStateMachine {
                         self = .sentNewKeys(state)
                         return result
                     case .newKeys:
-                        try state.receiveNewKeysMessage()
+                        let algorithms = try state.receiveNewKeysMessage()
                         self = .userAuthentication(.init(sentNewKeysState: state))
-                        return .noMessage
+                        return .event(algorithms)
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
@@ -643,10 +643,10 @@ struct SSHConnectionStateMachine {
                         self = .rekeying(state)
                         return result
                     case .newKeys:
-                        try state.receiveNewKeysMessage()
+                        let algorithms = try state.receiveNewKeysMessage()
                         let newState = RekeyingReceivedNewKeysState(state)
                         self = .rekeyingReceivedNewKeysState(newState)
-                        return .noMessage
+                        return .event(algorithms)
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
@@ -778,10 +778,10 @@ struct SSHConnectionStateMachine {
                         self = .rekeyingSentNewKeysState(state)
                         return result
                     case .newKeys:
-                        try state.receiveNewKeysMessage()
+                        let algorithms = try state.receiveNewKeysMessage()
                         let newState = ActiveState(state)
                         self = .active(newState)
-                        return .noMessage
+                        return .event(algorithms)
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
@@ -829,6 +829,9 @@ struct SSHConnectionStateMachine {
     /// The state of this state machine.
     private var state: State
 
+    /// What the latest key exchange settled on (NEOS fork); nil until the first completes.
+    private(set) var negotiatedAlgorithms: NIOSSHNegotiatedAlgorithms?
+
     init(
         role: SSHConnectionRole,
         protectionSchemes: [NIOSSHTransportProtection.Type] = Constants.bundledTransportProtectionSchemes
@@ -855,7 +858,15 @@ struct SSHConnectionStateMachine {
         allocator: ByteBufferAllocator,
         loop: EventLoop
     ) throws -> StateMachineInboundProcessResult? {
-        try self.state.processInboundMessage(allocator: allocator, loop: loop)
+        let result = try self.state.processInboundMessage(allocator: allocator, loop: loop)
+        // A finished key exchange is recorded, not passed on as a user event: code that
+        // waits for the first event after the handshake (a banner, auth success) must not
+        // see something new first.
+        if case .some(.event(let event)) = result, let algorithms = event as? NIOSSHNegotiatedAlgorithms {
+            self.negotiatedAlgorithms = algorithms
+            return .noMessage
+        }
+        return result
     }
 
     mutating func processOutboundMessage(
