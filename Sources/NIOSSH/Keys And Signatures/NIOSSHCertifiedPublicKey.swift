@@ -363,6 +363,9 @@ extension NIOSSHCertifiedPublicKey {
             return Self.p384KeyPrefix
         case .ecdsaP521:
             return Self.p521KeyPrefix
+        case .dsa:
+            // Never certified in practice; named for completeness, not read from the wire.
+            return "ssh-dss-cert-v01@openssh.com".utf8
         case .rsa:
             // Named for completeness. RSA certificates are not read from the wire: their
             // user-auth algorithms (`rsa-sha2-512-cert-v01@openssh.com` …) are not supported.

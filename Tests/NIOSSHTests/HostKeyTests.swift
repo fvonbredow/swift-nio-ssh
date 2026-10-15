@@ -255,9 +255,9 @@ final class HostKeyTests: XCTestCase {
     }
 
     func testUnrecognisedKey() throws {
-        // NEOS fork: was ssh-rsa, which this fork reads. DSA it does not.
+        // NEOS fork: was ssh-rsa, which this fork reads (and ssh-dss for host keys).
         var buffer = ByteBufferAllocator().buffer(capacity: 1024)
-        buffer.writeSSHString("ssh-dss".utf8)
+        buffer.writeSSHString("ssh-unknown@example.com".utf8)
 
         XCTAssertThrowsError(try buffer.readSSHHostKey()) { error in
             XCTAssertEqual((error as? NIOSSHError).map { $0.type }, .unknownPublicKey)
@@ -295,9 +295,9 @@ final class HostKeyTests: XCTestCase {
     }
 
     func testUnrecognisedSignature() throws {
-        // NEOS fork: was ssh-rsa, which this fork reads. DSA it does not.
+        // NEOS fork: was ssh-rsa, which this fork reads (and ssh-dss for host keys).
         var buffer = ByteBufferAllocator().buffer(capacity: 1024)
-        buffer.writeSSHString("ssh-dss".utf8)
+        buffer.writeSSHString("ssh-unknown@example.com".utf8)
 
         XCTAssertThrowsError(try buffer.readSSHSignature()) { error in
             XCTAssertEqual((error as? NIOSSHError).map { $0.type }, .unknownSignature)

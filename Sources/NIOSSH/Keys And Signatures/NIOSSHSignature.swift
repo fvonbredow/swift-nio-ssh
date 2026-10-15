@@ -47,6 +47,9 @@ extension NIOSSHSignature {
         /// `rsa-sha2-512`, `rsa-sha2-256` or `ssh-rsa`, depending on the algorithm inside.
         case rsa(RSASignature)
 
+        /// `ssh-dss`: host key signatures from old equipment, verified only.
+        case dsa(DSASignature)
+
         internal enum RawBytes {
             case byteBuffer(ByteBuffer)
             case data(Data)
@@ -64,6 +67,9 @@ extension NIOSSHSignature {
 
     /// The prefix of a P521 ECDSA public key.
     fileprivate static let ecdsaP521SignaturePrefix = "ecdsa-sha2-nistp521".utf8
+
+    /// The prefix of a DSA signature.
+    fileprivate static let dsaSignaturePrefix = "ssh-dss".utf8
 
     /// The hash an RSA signature was made with; nil for every other kind.
     internal var rsaAlgorithm: RSASignatureAlgorithm? {
@@ -89,6 +95,8 @@ extension NIOSSHSignature {
             return Self.ecdsaP521SignaturePrefix
         case .rsa(let signature):
             return signature.algorithm.name
+        case .dsa:
+            return Self.dsaSignaturePrefix
         }
     }
 }
@@ -127,11 +135,14 @@ extension NIOSSHSignature.BackingSignature: Equatable {
             return lhs.rawRepresentation == rhs.rawRepresentation
         case (.rsa(let lhs), .rsa(let rhs)):
             return lhs == rhs
+        case (.dsa(let lhs), .dsa(let rhs)):
+            return lhs == rhs
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
             (.ecdsaP521, _),
-            (.rsa, _):
+            (.rsa, _),
+            (.dsa, _):
             return false
         }
     }
@@ -155,6 +166,9 @@ extension NIOSSHSignature.BackingSignature: Hashable {
         case .rsa(let sig):
             hasher.combine(4)
             hasher.combine(sig)
+        case .dsa(let sig):
+            hasher.combine(5)
+            hasher.combine(sig)
         }
     }
 }
@@ -177,6 +191,12 @@ extension ByteBuffer {
             // not an mpint, and exactly as long as the modulus.
             var writtenLength = self.writeSSHString(sig.algorithm.name)
             writtenLength += self.writeSSHString(sig.bytes)
+            return writtenLength
+        case .dsa(let sig):
+            // r and s, each left-padded to 20 bytes, as one 40-byte string.
+            func padded(_ x: [UInt8]) -> [UInt8] { [UInt8](repeating: 0, count: max(0, 20 - x.count)) + x }
+            var writtenLength = self.writeSSHString(NIOSSHSignature.dsaSignaturePrefix)
+            writtenLength += self.writeSSHString(padded(sig.r) + padded(sig.s))
             return writtenLength
         }
     }
@@ -273,6 +293,17 @@ extension ByteBuffer {
                 return try buffer.readECDSAP384Signature()
             } else if bytesView.elementsEqual(NIOSSHSignature.ecdsaP521SignaturePrefix) {
                 return try buffer.readECDSAP521Signature()
+            } else if bytesView.elementsEqual(NIOSSHSignature.dsaSignaturePrefix) {
+                guard let blob = buffer.readSSHString() else {
+                    return nil
+                }
+                let bytes = Array(blob.readableBytesView)
+                guard bytes.count == 40 else {
+                    throw NIOSSHError.invalidSSHMessage(reason: "ssh-dss signature is not 40 bytes")
+                }
+                return NIOSSHSignature(
+                    backingSignature: .dsa(DSASignature(r: Array(bytes[0..<20]), s: Array(bytes[20..<40])))
+                )
             } else if let algorithm = RSASignatureAlgorithm(name: bytesView) {
                 guard let signatureBytes = buffer.readSSHString() else {
                     return nil

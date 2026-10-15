@@ -762,7 +762,7 @@ extension SSHKeyExchangeStateMachine {
     /// server offers nothing else, which is the case for a lot of older network equipment.
     static let supportedServerHostKeyAlgorithms: [Substring] = [
         "ssh-ed25519", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp521",
-        "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa",
+        "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa", "ssh-dss",
     ]
 
     /// The client's host key algorithms with those of the preferred key types first, in the
