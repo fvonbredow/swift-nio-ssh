@@ -35,7 +35,13 @@ public struct NIOSSHAvailableUserAuthenticationMethods: OptionSet, Sendable {
     /// Host-based authentication is acceptable.
     public static let hostBased: NIOSSHAvailableUserAuthenticationMethods = .init(rawValue: 1 << 2)
 
+    /// Keyboard-interactive authentication (RFC 4256) is acceptable (NEOS fork).
+    public static let keyboardInteractive: NIOSSHAvailableUserAuthenticationMethods = .init(rawValue: 1 << 3)
+
     /// A short-hand for all supported authentication types.
+    ///
+    /// Keyboard-interactive is not among them (NEOS fork): a server that declares `.all`
+    /// would otherwise announce a method it was never written to handle.
     public static let all: NIOSSHAvailableUserAuthenticationMethods = [.publicKey, .password, .hostBased]
 }
 
@@ -51,6 +57,8 @@ extension NIOSSHAvailableUserAuthenticationMethods {
                 self.insert(.password)
             case "hostbased":
                 self.insert(.hostBased)
+            case "keyboard-interactive":
+                self.insert(.keyboardInteractive)
             default:
                 // This is an unknown method, which we ignore.
                 break
@@ -75,6 +83,9 @@ extension NIOSSHAvailableUserAuthenticationMethods {
         }
         if self.contains(.hostBased) {
             methods.append("hostbased")
+        }
+        if self.contains(.keyboardInteractive) {
+            methods.append("keyboard-interactive")
         }
 
         return methods
@@ -114,10 +125,36 @@ extension NIOSSHUserAuthenticationRequest {
 
         /// The client believes it does not need authentication.
         case none
+
+        /// The client would like to answer questions (RFC 4256; NEOS fork). Answer with
+        /// ``NIOSSHUserAuthenticationOutcome/keyboardInteractiveChallenge(_:)``, or refuse.
+        case keyboardInteractive(KeyboardInteractive)
+
+        /// The client's answers to the last challenge, one per prompt (NEOS fork).
+        case keyboardInteractiveResponse(KeyboardInteractiveResponse)
     }
 }
 
 extension NIOSSHUserAuthenticationRequest.Request {
+    /// A keyboard-interactive attempt, before any question (NEOS fork).
+    public struct KeyboardInteractive: Sendable, Hashable {
+        /// Hints the client may give about the methods it wants; usually empty.
+        public var submethods: String
+
+        public init(submethods: String) {
+            self.submethods = submethods
+        }
+    }
+
+    /// The answers to a keyboard-interactive challenge (NEOS fork).
+    public struct KeyboardInteractiveResponse: Sendable, Hashable {
+        public var responses: [String]
+
+        public init(responses: [String]) {
+            self.responses = responses
+        }
+    }
+
     /// Information provided by the client when attempting to perform a public-key authentication.
     public struct PublicKey: Sendable {
         /// The user's public key.
@@ -189,10 +226,58 @@ extension NIOSSHUserAuthenticationOffer {
 
         /// The client believes it does not need authentication.
         case none
+
+        /// The client answers the server's questions (RFC 4256; NEOS fork): a password, a
+        /// one-time code, whatever the server asks.
+        case keyboardInteractive(KeyboardInteractive)
+    }
+}
+
+/// One round of keyboard-interactive questions (RFC 4256; NEOS fork).
+public struct NIOSSHKeyboardInteractiveChallenge: Sendable, Hashable {
+    /// Often empty; a title for the questions when not.
+    public var name: String
+    /// Often empty; text to show before the questions when not.
+    public var instruction: String
+    public var prompts: [Prompt]
+
+    public struct Prompt: Sendable, Hashable {
+        public var text: String
+        /// Whether the answer may be shown as it is typed. A password: false.
+        public var echo: Bool
+
+        public init(text: String, echo: Bool) {
+            self.text = text
+            self.echo = echo
+        }
+    }
+
+    public init(name: String, instruction: String, prompts: [Prompt]) {
+        self.name = name
+        self.instruction = instruction
+        self.prompts = prompts
     }
 }
 
 extension NIOSSHUserAuthenticationOffer.Offer {
+    /// Answers keyboard-interactive questions (NEOS fork).
+    public struct KeyboardInteractive: Sendable {
+        public var submethods: String
+
+        /// Called for each round of questions the server asks, on the connection's event loop.
+        /// Complete the promise with exactly one answer per prompt — none for a round without
+        /// prompts — or with nil to give up, after which the server refuses this attempt.
+        public var respond: @Sendable (NIOSSHKeyboardInteractiveChallenge, EventLoopPromise<[String]?>) -> Void
+
+        public init(
+            submethods: String = "",
+            respond: @escaping @Sendable (NIOSSHKeyboardInteractiveChallenge, EventLoopPromise<[String]?>) -> Void
+        ) {
+            self.submethods = submethods
+            self.respond = respond
+        }
+    }
+
     /// Information provided by the client when attempting to perform private key authentication.
     public struct PrivateKey: Sendable {
         /// The client's private key.
@@ -265,6 +350,8 @@ extension SSHMessage.UserAuthRequestMessage {
             fatalError("Unsupported")
         case .none:
             self.method = .none
+        case .keyboardInteractive(let keyboardInteractive):
+            self.method = .keyboardInteractive(submethods: keyboardInteractive.submethods)
         }
     }
 }
@@ -281,6 +368,10 @@ public enum NIOSSHUserAuthenticationOutcome: Sendable {
 
     /// The authentication attempt failed.
     case failure
+
+    /// Ask the client these questions (keyboard-interactive, RFC 4256; NEOS fork). Its
+    /// answers arrive as ``NIOSSHUserAuthenticationRequest/Request/keyboardInteractiveResponse(_:)``.
+    case keyboardInteractiveChallenge(NIOSSHKeyboardInteractiveChallenge)
 }
 
 enum NIOSSHUserAuthenticationResponseMessage {
@@ -288,6 +379,7 @@ enum NIOSSHUserAuthenticationResponseMessage {
     case failure(SSHMessage.UserAuthFailureMessage)
     case publicKeyOK(SSHMessage.UserAuthPKOKMessage)
     case disconnect(SSHMessage.DisconnectMessage)
+    case infoRequest(SSHMessage.UserAuthInfoRequestMessage)
 }
 
 extension NIOSSHUserAuthenticationResponseMessage {
@@ -304,6 +396,15 @@ extension NIOSSHUserAuthenticationResponseMessage {
                 partialSuccess: false
             )
             self = .failure(message)
+        case .keyboardInteractiveChallenge(let challenge):
+            self = .infoRequest(
+                .init(
+                    name: challenge.name,
+                    instruction: challenge.instruction,
+                    languageTag: "",
+                    prompts: challenge.prompts.map { .init(prompt: $0.text, echo: $0.echo) }
+                )
+            )
         }
     }
 }

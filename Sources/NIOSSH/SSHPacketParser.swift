@@ -353,7 +353,10 @@ struct SSHPacketParser {
             buffer.moveReaderIndex(forwardBy: MemoryLayout<UInt32>.size)
 
             var content = try buffer.sliceContentFromPadding()
-            guard let message = try content.readSSHMessage(expectingGroupExchangeGroup: self.expectsGroupExchangeGroup), content.readableBytes == 0, buffer.readableBytes == 0
+            guard let message = try content.readSSHMessage(
+                    expectingGroupExchangeGroup: self.expectsGroupExchangeGroup,
+                    expectingUserAuthInfoRequest: !self.isServer
+                ), content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.
                 throw NIOSSHError.invalidPacketFormat
@@ -370,7 +373,10 @@ struct SSHPacketParser {
             }
 
             var content = try protection.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: self.sequenceNumber)
-            guard let message = try content.readSSHMessage(expectingGroupExchangeGroup: self.expectsGroupExchangeGroup), content.readableBytes == 0, buffer.readableBytes == 0
+            guard let message = try content.readSSHMessage(
+                    expectingGroupExchangeGroup: self.expectsGroupExchangeGroup,
+                    expectingUserAuthInfoRequest: !self.isServer
+                ), content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.
                 throw NIOSSHError.invalidPacketFormat

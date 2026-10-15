@@ -111,6 +111,26 @@ extension AcceptsUserAuthMessages {
         }
     }
 
+    mutating func receiveUserAuthInfoRequest(
+        _ message: SSHMessage.UserAuthInfoRequestMessage
+    ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
+        let future = try self.userAuthStateMachine.receiveUserAuthInfoRequest(message)
+        return .possibleFutureMessage(future.map { SSHMultiMessage(.userAuthInfoResponse($0)) })
+    }
+
+    mutating func receiveUserAuthInfoResponse(
+        _ message: SSHMessage.UserAuthInfoResponseMessage
+    ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
+        let future = try self.userAuthStateMachine.receiveUserAuthInfoResponse(message)
+        let banner: SSHServerConfiguration.UserAuthBanner?
+        if case .server(let config) = role {
+            banner = config.banner
+        } else {
+            banner = nil
+        }
+        return .possibleFutureMessage(future.map { Self.transform($0, banner: banner) })
+    }
+
     mutating func receiveUserAuthBanner(
         _ message: SSHMessage.UserAuthBannerMessage
     ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
@@ -138,6 +158,8 @@ extension AcceptsUserAuthMessages {
             return SSHMultiMessage(.userAuthFailure(message))
         case .publicKeyOK(let message):
             return SSHMultiMessage(.userAuthPKOK(message))
+        case .infoRequest(let message):
+            return SSHMultiMessage(.userAuthInfoRequest(message))
         case .disconnect(let disconnect):
             return SSHMultiMessage(.disconnect(disconnect))
         }

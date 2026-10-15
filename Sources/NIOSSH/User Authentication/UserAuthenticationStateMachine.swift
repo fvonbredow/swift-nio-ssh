@@ -27,6 +27,11 @@ struct UserAuthenticationStateMachine {
     /// future callback that cannot mutate this struct; it is only touched on `loop`.
     private let rsaNegotiation = RSAAlgorithmNegotiation()
 
+    /// Server: the user of a keyboard-interactive attempt in progress, and whether a
+    /// challenge has gone out whose answers are due (NEOS fork).
+    private var keyboardInteractiveUser: (username: String, service: String)?
+    private var awaitingKeyboardInteractiveAnswers = false
+
     /// The maximum number of `SSH_MSG_USERAUTH_REQUEST` messages this server will process before
     /// disconnecting. Taken from `SSHServerConfiguration`; `.max` for clients, which never enforce it.
     private let maxAuthAttempts: Int
@@ -136,9 +141,14 @@ extension UserAuthenticationStateMachine {
                 )
             }
 
-            // Cool, we can begin the auth dance.
+            // Cool, we can begin the auth dance. Nothing is known about the server yet, so
+            // every method is possible, keyboard-interactive included (NEOS fork).
             self.state = .awaitingNextRequest(attempts: 0)
-            return self.requestNextAuthRequest(methods: .all, partialSuccess: false, delegate: delegate)
+            return self.requestNextAuthRequest(
+                methods: [.all, .keyboardInteractive],
+                partialSuccess: false,
+                delegate: delegate
+            )
         case (.client, .authenticationSucceeded):
             // We should ignore all further auth messages in this state.
             return nil
@@ -174,6 +184,14 @@ extension UserAuthenticationStateMachine {
                 protocolName: Self.protocolName,
                 violation: "requested unsupported service: \(message.service)"
             )
+        }
+
+        // A new request ends any keyboard-interactive conversation (RFC 4256 § 3.4).
+        self.awaitingKeyboardInteractiveAnswers = false
+        if case .keyboardInteractive = message.method {
+            self.keyboardInteractiveUser = (message.username, message.service)
+        } else {
+            self.keyboardInteractiveUser = nil
         }
 
         switch (self.delegate, self.state) {
@@ -285,6 +303,62 @@ extension UserAuthenticationStateMachine {
         }
     }
 
+    /// Client: the server asks keyboard-interactive questions (RFC 4256; NEOS fork).
+    mutating func receiveUserAuthInfoRequest(
+        _ message: SSHMessage.UserAuthInfoRequestMessage
+    ) throws -> EventLoopFuture<SSHMessage.UserAuthInfoResponseMessage> {
+        guard case .client = self.delegate, case .awaitingResponses = self.state,
+            let keyboardInteractive = self.rsaNegotiation.keyboardInteractive
+        else {
+            throw NIOSSHError.protocolViolation(
+                protocolName: Self.protocolName,
+                violation: "keyboard-interactive questions without a keyboard-interactive attempt"
+            )
+        }
+        let challenge = NIOSSHKeyboardInteractiveChallenge(
+            name: message.name,
+            instruction: message.instruction,
+            prompts: message.prompts.map { .init(text: $0.prompt, echo: $0.echo) }
+        )
+        let promise = self.loop.makePromise(of: [String]?.self)
+        keyboardInteractive.respond(challenge, promise)
+        let count = message.prompts.count
+        return promise.futureResult.map { answers in
+            // Giving up, or the wrong number of answers: empty ones, which the server refuses.
+            guard let answers, answers.count == count else {
+                return .init(responses: Array(repeating: "", count: count))
+            }
+            return .init(responses: answers)
+        }
+    }
+
+    /// Server: the answers to the challenge it sent (NEOS fork).
+    mutating func receiveUserAuthInfoResponse(
+        _ message: SSHMessage.UserAuthInfoResponseMessage
+    ) throws -> EventLoopFuture<NIOSSHUserAuthenticationResponseMessage> {
+        guard case .server(let delegate) = self.delegate, case .awaitingNextRequest(let attempts) = self.state,
+            self.awaitingKeyboardInteractiveAnswers, let user = self.keyboardInteractiveUser
+        else {
+            throw NIOSSHError.protocolViolation(
+                protocolName: Self.protocolName,
+                violation: "keyboard-interactive answers nobody asked for"
+            )
+        }
+        self.awaitingKeyboardInteractiveAnswers = false
+        self.state = .awaitingResponses(attempts: attempts, pending: 1)
+        let request = NIOSSHUserAuthenticationRequest(
+            username: user.username,
+            serviceName: user.service,
+            request: .keyboardInteractiveResponse(.init(responses: message.responses))
+        )
+        let promise = self.loop.makePromise(of: NIOSSHUserAuthenticationOutcome.self)
+        delegate.requestReceived(request: request, responsePromise: promise)
+        let supportedMethods = delegate.supportedAuthenticationMethods
+        return promise.futureResult.map { outcome in
+            .init(outcome, supportedMethods: supportedMethods)
+        }
+    }
+
     mutating func receiveUserAuthBanner(_: SSHMessage.UserAuthBannerMessage) throws {
         switch (self.delegate, self.state) {
         case (.client, .idle), (.client, .authenticationSucceeded):
@@ -389,6 +463,23 @@ extension UserAuthenticationStateMachine {
 
     mutating func sendUserAuthSuccess() {
         self.sendUserAuthResponseMessage(success: true)
+    }
+
+    /// Server: a challenge goes out. The attempt is not over; its answers come next.
+    mutating func sendUserAuthInfoRequest(_: SSHMessage.UserAuthInfoRequestMessage) {
+        precondition(self.keyboardInteractiveUser != nil, "A challenge only answers a keyboard-interactive request")
+        self.sendUserAuthResponseMessage(success: false)
+        self.awaitingKeyboardInteractiveAnswers = true
+    }
+
+    /// Client: answers go out; the server's verdict is still due.
+    mutating func sendUserAuthInfoResponse(_: SSHMessage.UserAuthInfoResponseMessage) {
+        switch (self.delegate, self.state) {
+        case (.client, .awaitingResponses):
+            break
+        default:
+            preconditionFailure("May not send keyboard-interactive answers in \(self.state)")
+        }
     }
 
     mutating func sendUserAuthFailure(_: SSHMessage.UserAuthFailureMessage) {
@@ -581,6 +672,19 @@ extension UserAuthenticationStateMachine {
             // For now we do a shortcut: we just say that all keys are acceptable, rather than ask the delegate.
             return self.loop.makeSucceededFuture(.publicKeyOK(.init(key: key)))
 
+        case .keyboardInteractive(let submethods):
+            let request = NIOSSHUserAuthenticationRequest(
+                username: request.username,
+                serviceName: request.service,
+                request: .keyboardInteractive(.init(submethods: submethods))
+            )
+            let promise = self.loop.makePromise(of: NIOSSHUserAuthenticationOutcome.self)
+            delegate.requestReceived(request: request, responsePromise: promise)
+            let supportedMethods = delegate.supportedAuthenticationMethods
+            return promise.futureResult.map { outcome in
+                .init(outcome, supportedMethods: supportedMethods)
+            }
+
         case .publicKey(.unknown):
             // We don't known the algorithm, the auth attempt has failed.
             return self.loop.makeSucceededFuture(
@@ -618,10 +722,18 @@ extension UserAuthenticationStateMachine {
 final class RSAAlgorithmNegotiation: @unchecked Sendable {
     var serverSignatureAlgorithms: [Substring]?
 
+    /// The answerer of the keyboard-interactive attempt in progress, if that is what it is.
+    var keyboardInteractive: NIOSSHUserAuthenticationOffer.Offer.KeyboardInteractive?
+
     private var retry: (offer: NIOSSHUserAuthenticationOffer, remaining: [RSASignatureAlgorithm])?
 
     /// The algorithm to sign a fresh offer with; nil when it is not an RSA key.
     func firstAlgorithm(for offer: NIOSSHUserAuthenticationOffer) -> RSASignatureAlgorithm? {
+        if case .keyboardInteractive(let keyboardInteractive) = offer.offer {
+            self.keyboardInteractive = keyboardInteractive
+        } else {
+            self.keyboardInteractive = nil
+        }
         guard case .privateKey(let key) = offer.offer, key.publicKey.isRSA else {
             self.retry = nil
             return nil

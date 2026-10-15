@@ -10,6 +10,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308),
+// legacy key exchanges and ciphers for older network equipment, strict key exchange.
+//
 //===----------------------------------------------------------------------===//
 
 import Crypto
@@ -259,6 +262,8 @@ final class UserAuthenticationStateMachineTests: XCTestCase {
                 XCTFail("Unexpected success")
             case .success(.disconnect):
                 XCTFail("Unexpected disconnect")
+            case .success(.infoRequest):
+                XCTFail("Unexpected keyboard-interactive challenge")
             case .failure(let error):
                 XCTFail("Unexpected error: \(error)")
             }
@@ -289,6 +294,8 @@ final class UserAuthenticationStateMachineTests: XCTestCase {
                 XCTFail("Unexpected failure")
             case .success(.disconnect):
                 XCTFail("Unexpected disconnect")
+            case .success(.infoRequest):
+                XCTFail("Unexpected keyboard-interactive challenge")
             case .failure(let error):
                 XCTFail("Unexpected error: \(error)")
             }
@@ -320,6 +327,8 @@ final class UserAuthenticationStateMachineTests: XCTestCase {
                 XCTFail("Unexpected failure")
             case .success(.disconnect):
                 XCTFail("Unexpected disconnect")
+            case .success(.infoRequest):
+                XCTFail("Unexpected keyboard-interactive challenge")
             case .failure(let error):
                 XCTFail("Unexpected error: \(error)")
             }
@@ -351,6 +360,8 @@ final class UserAuthenticationStateMachineTests: XCTestCase {
                 XCTFail("Unexpected public key ok")
             case .success(.success):
                 XCTFail("Unexpected success")
+            case .success(.infoRequest):
+                XCTFail("Unexpected keyboard-interactive challenge")
             case .failure(let error):
                 XCTFail("Unexpected error: \(error)")
             }

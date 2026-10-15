@@ -42,6 +42,8 @@ enum SSHMessage: Equatable {
     case userAuthSuccess
     case userAuthBanner(UserAuthBannerMessage)
     case userAuthPKOK(UserAuthPKOKMessage)
+    case userAuthInfoRequest(UserAuthInfoRequestMessage)
+    case userAuthInfoResponse(UserAuthInfoResponseMessage)
     case globalRequest(GlobalRequestMessage)
     case requestSuccess(RequestSuccessMessage)
     case requestFailure
@@ -206,6 +208,8 @@ extension SSHMessage {
             case none
             case publicKey(PublicKeyAuthType)
             case password(String)
+            /// RFC 4256 (NEOS fork). The language tag is deprecated and always empty.
+            case keyboardInteractive(submethods: String)
         }
 
         enum PublicKeyAuthType: Equatable {
@@ -239,6 +243,33 @@ extension SSHMessage {
 
         /// tag identifying language of banner, following RFC 3066
         var languageTag: String
+    }
+
+    /// SSH_MSG_USERAUTH_INFO_REQUEST (RFC 4256; NEOS fork). It shares number 60 with PK_OK,
+    /// which a client never receives here — NIOSSH clients do not query keys — so a client
+    /// reads 60 as this.
+    struct UserAuthInfoRequestMessage: Equatable {
+        static let id: UInt8 = 60
+
+        var name: String
+        var instruction: String
+        var languageTag: String
+        var prompts: [Prompt]
+
+        struct Prompt: Equatable {
+            var prompt: String
+            var echo: Bool
+        }
+
+        /// More would be a server trying to make a client allocate, not a login form.
+        static let maximumPrompts: UInt32 = 64
+    }
+
+    /// SSH_MSG_USERAUTH_INFO_RESPONSE (RFC 4256; NEOS fork).
+    struct UserAuthInfoResponseMessage: Equatable {
+        static let id: UInt8 = 61
+
+        var responses: [String]
     }
 
     struct UserAuthPKOKMessage: Equatable {
@@ -428,10 +459,28 @@ extension ByteBuffer {
     /// - parameters:
     ///     - expectingGroupExchangeGroup: read message 31 as KEX_DH_GEX_GROUP rather than
     ///       KEX_ECDH_REPLY — true while a client waits for the group of a group exchange.
-    mutating func readSSHMessage(expectingGroupExchangeGroup: Bool = false) throws -> SSHMessage? {
+    ///     - expectingUserAuthInfoRequest: read message 60 as USERAUTH_INFO_REQUEST rather
+    ///       than USERAUTH_PK_OK — true on a client.
+    mutating func readSSHMessage(
+        expectingGroupExchangeGroup: Bool = false,
+        expectingUserAuthInfoRequest: Bool = false
+    ) throws -> SSHMessage? {
         try self.rewindOnNilOrError { `self` in
             guard let type = self.readInteger(as: UInt8.self) else {
                 return nil
+            }
+
+            if expectingUserAuthInfoRequest, type == SSHMessage.UserAuthInfoRequestMessage.id {
+                guard let message = try self.readUserAuthInfoRequestMessage() else {
+                    return nil
+                }
+                return .userAuthInfoRequest(message)
+            }
+            if type == SSHMessage.UserAuthInfoResponseMessage.id {
+                guard let message = try self.readUserAuthInfoResponseMessage() else {
+                    return nil
+                }
+                return .userAuthInfoResponse(message)
             }
 
             if expectingGroupExchangeGroup, type == SSHMessage.KeyExchangeDHGEXGroupMessage.id {
@@ -801,6 +850,13 @@ extension ByteBuffer {
                 }
 
                 method = .password(password)
+            case "keyboard-interactive":
+                guard self.readSSHString() != nil,  // language tag, deprecated
+                    let submethods = self.readSSHStringAsString()
+                else {
+                    return nil
+                }
+                method = .keyboardInteractive(submethods: submethods)
             case "publickey":
                 guard
                     let expectSignature = self.readSSHBoolean(),
@@ -854,6 +910,49 @@ extension ByteBuffer {
             }
 
             return SSHMessage.UserAuthRequestMessage(username: username, service: service, method: method)
+        }
+    }
+
+    mutating func readUserAuthInfoRequestMessage() throws -> SSHMessage.UserAuthInfoRequestMessage? {
+        try self.rewindOnNilOrError { `self` in
+            guard
+                let name = self.readSSHStringAsString(),
+                let instruction = self.readSSHStringAsString(),
+                let languageTag = self.readSSHStringAsString(),
+                let count = self.readInteger(as: UInt32.self)
+            else {
+                return nil
+            }
+            guard count <= SSHMessage.UserAuthInfoRequestMessage.maximumPrompts else {
+                throw NIOSSHError.invalidSSHMessage(reason: "keyboard-interactive: \(count) prompts")
+            }
+            var prompts: [SSHMessage.UserAuthInfoRequestMessage.Prompt] = []
+            for _ in 0..<count {
+                guard let prompt = self.readSSHStringAsString(), let echo = self.readSSHBoolean() else {
+                    return nil
+                }
+                prompts.append(.init(prompt: prompt, echo: echo))
+            }
+            return .init(name: name, instruction: instruction, languageTag: languageTag, prompts: prompts)
+        }
+    }
+
+    mutating func readUserAuthInfoResponseMessage() throws -> SSHMessage.UserAuthInfoResponseMessage? {
+        try self.rewindOnNilOrError { `self` in
+            guard let count = self.readInteger(as: UInt32.self) else {
+                return nil
+            }
+            guard count <= SSHMessage.UserAuthInfoRequestMessage.maximumPrompts else {
+                throw NIOSSHError.invalidSSHMessage(reason: "keyboard-interactive: \(count) responses")
+            }
+            var responses: [String] = []
+            for _ in 0..<count {
+                guard let response = self.readSSHStringAsString() else {
+                    return nil
+                }
+                responses.append(response)
+            }
+            return .init(responses: responses)
         }
     }
 
@@ -1379,6 +1478,22 @@ extension ByteBuffer {
         case .userAuthBanner(let message):
             writtenBytes += self.writeInteger(SSHMessage.UserAuthBannerMessage.id)
             writtenBytes += self.writeUserAuthBannerMessage(message)
+        case .userAuthInfoRequest(let message):
+            writtenBytes += self.writeInteger(SSHMessage.UserAuthInfoRequestMessage.id)
+            writtenBytes += self.writeSSHString(message.name.utf8)
+            writtenBytes += self.writeSSHString(message.instruction.utf8)
+            writtenBytes += self.writeSSHString(message.languageTag.utf8)
+            writtenBytes += self.writeInteger(UInt32(message.prompts.count))
+            for prompt in message.prompts {
+                writtenBytes += self.writeSSHString(prompt.prompt.utf8)
+                writtenBytes += self.writeSSHBoolean(prompt.echo)
+            }
+        case .userAuthInfoResponse(let message):
+            writtenBytes += self.writeInteger(SSHMessage.UserAuthInfoResponseMessage.id)
+            writtenBytes += self.writeInteger(UInt32(message.responses.count))
+            for response in message.responses {
+                writtenBytes += self.writeSSHString(response.utf8)
+            }
         case .userAuthPKOK(let message):
             writtenBytes += self.writeInteger(SSHMessage.UserAuthPKOKMessage.id)
             writtenBytes += self.writeUserAuthPKOKMessage(message)
@@ -1526,6 +1641,10 @@ extension ByteBuffer {
             writtenBytes += self.writeSSHString("password".utf8)
             writtenBytes += self.writeSSHBoolean(false)
             writtenBytes += self.writeSSHString(password.utf8)
+        case .keyboardInteractive(let submethods):
+            writtenBytes += self.writeSSHString("keyboard-interactive".utf8)
+            writtenBytes += self.writeSSHString("".utf8)
+            writtenBytes += self.writeSSHString(submethods.utf8)
         case .publicKey(.known(key: let key, signature: let signature)):
             writtenBytes += self.writeSSHString("publickey".utf8)
             writtenBytes += self.writeSSHBoolean(signature != nil)
