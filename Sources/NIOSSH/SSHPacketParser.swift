@@ -315,7 +315,7 @@ struct SSHPacketParser {
             return nil
         }
 
-        try protection.decryptFirstBlock(&self.buffer)
+        try protection.decryptFirstBlock(&self.buffer, sequenceNumber: self.sequenceNumber)
 
         // This force unwrap is safe because we must have a block size, and a block size is always going to be more than 4 bytes.
         let length = self.buffer.getInteger(at: self.buffer.readerIndex, as: UInt32.self)!

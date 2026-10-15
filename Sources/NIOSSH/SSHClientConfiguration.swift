@@ -79,7 +79,7 @@ public struct SSHClientConfiguration {
             userAuthDelegate: userAuthDelegate,
             serverAuthDelegate: serverAuthDelegate,
             globalRequestDelegate: globalRequestDelegate,
-            transportProtectionSchemes: Constants.bundledTransportProtectionSchemes
+            transportProtectionSchemes: Constants.clientTransportProtectionSchemes
         )
     }
 

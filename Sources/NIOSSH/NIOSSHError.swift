@@ -164,6 +164,8 @@ extension NIOSSHError {
         NIOSSHError(type: .invalidCertificate, diagnostics: diagnostics)
     }
 
+    internal static let invalidMAC = NIOSSHError(type: .invalidMAC, diagnostics: nil)
+
     @inline(never)
     internal static func invalidRSAKey(reason: String) -> NIOSSHError {
         NIOSSHError(type: .invalidRSAKey, diagnostics: reason)
@@ -215,6 +217,7 @@ extension NIOSSHError {
             case invalidOpenSSHPublicKey
             case invalidCertificate
             case invalidRSAKey
+            case invalidMAC
         }
 
         private var base: Base
@@ -315,6 +318,9 @@ extension NIOSSHError {
 
         /// An RSA key could not be used: too small, inconsistent, or not an RSA key at all.
         public static let invalidRSAKey: ErrorType = .init(.invalidRSAKey)
+
+        /// A packet's MAC did not verify: corrupted or tampered with on the way.
+        public static let invalidMAC: ErrorType = .init(.invalidMAC)
     }
 }
 

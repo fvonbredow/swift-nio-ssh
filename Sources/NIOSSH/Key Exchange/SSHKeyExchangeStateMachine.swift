@@ -610,12 +610,16 @@ struct SSHKeyExchangeStateMachine {
 
     /// The encryption algorithms supported by this peer, in order of preference.
     private var supportedEncryptionAlgorithms: [Substring] {
-        self.protectionSchemes.map { Substring($0.cipherName) }
+        // Each cipher comes once per MAC it pairs with; name it once, in first-seen order.
+        var seen = Set<Substring>()
+        return self.protectionSchemes.map { Substring($0.cipherName) }.filter { seen.insert($0).inserted }
     }
 
     /// The MAC algorithms supported by this peer, in order of preference.
     private var supportedMacAlgorithms: [Substring] {
+        var seen = Set<Substring>()
         let schemes = self.protectionSchemes.compactMap { $0.macName.map { Substring($0) } }
+            .filter { seen.insert($0).inserted }
 
         // We do a weird thing here: if there are no MAC schemes, we lie and put one in. This is
         // because some schemes (such as AES-GCM in OpenSSH mode) ignore the MAC negotiation.

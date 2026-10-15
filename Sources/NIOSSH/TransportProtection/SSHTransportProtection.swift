@@ -83,6 +83,11 @@ public protocol NIOSSHTransportProtection: AnyObject {
     /// partial packet decryption.
     func decryptFirstBlock(_ source: inout ByteBuffer) throws
 
+    /// The same, for schemes that need the packet's sequence number to read its length
+    /// (chacha20-poly1305@openssh.com). This is the one the parser calls; by default it
+    /// forwards to `decryptFirstBlock(_:)`. (NEOS fork.)
+    func decryptFirstBlock(_ source: inout ByteBuffer, sequenceNumber: UInt32) throws
+
     /// Decrypt the remainder of the packet.
     ///
     /// This function will only be called once per call to `decryptFirstBlock`, and may not be
@@ -98,6 +103,10 @@ public protocol NIOSSHTransportProtection: AnyObject {
 }
 
 extension NIOSSHTransportProtection {
+    public func decryptFirstBlock(_ source: inout ByteBuffer, sequenceNumber: UInt32) throws {
+        try self.decryptFirstBlock(&source)
+    }
+
     /// Obtains the block size for this specific instantiated cipher.
     var cipherBlockSize: Int {
         // We just delegate to the static.

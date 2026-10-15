@@ -34,10 +34,29 @@ public enum Constants: Sendable {
     /// two stay coupled. Matches the multiplier used by OpenSSH.
     static let channelWindowSizePacketMultiple = 64
 
-    public static let bundledTransportProtectionSchemes: [(NIOSSHTransportProtection & _NIOSSHSendableMetatype).Type] =
-        [
+    public static let bundledTransportProtectionSchemes: [(NIOSSHTransportProtection & _NIOSSHSendableMetatype).Type] = {
+        var schemes: [(NIOSSHTransportProtection & _NIOSSHSendableMetatype).Type] = [
             AES256GCMOpenSSHTransportProtection.self, AES128GCMOpenSSHTransportProtection.self,
+            // NEOS fork: OpenSSH's first choice; strict key exchange guards it against Terrapin.
+            ChaCha20Poly1305OpenSSHTransportProtection.self,
         ]
+        #if canImport(CommonCrypto)
+        // NEOS fork: AES-CTR with HMAC-SHA2, for servers without AES-GCM.
+        schemes += CipherMACSchemes.modern
+        #endif
+        return schemes
+    }()
+
+    /// A client's default (NEOS fork): the bundled schemes, then what older network equipment
+    /// needs — HMAC-SHA1, CBC, 3DES. A client takes those only when a server offers nothing
+    /// else; a server does not offer them unless configured to.
+    public static let clientTransportProtectionSchemes: [(NIOSSHTransportProtection & _NIOSSHSendableMetatype).Type] = {
+        #if canImport(CommonCrypto)
+        return bundledTransportProtectionSchemes + CipherMACSchemes.legacy
+        #else
+        return bundledTransportProtectionSchemes
+        #endif
+    }()
 
     /// The default value for `SSHServerConfiguration.maxAuthAttempts`: the maximum number of
     /// `SSH_MSG_USERAUTH_REQUEST` messages a server processes on a single connection before

@@ -92,6 +92,9 @@ class BackToBackEmbeddedChannel {
         )
         clientConfiguration.preferredHostKeyTypes = harness.clientPreferredHostKeyTypes
         clientConfiguration.keyExchangeAlgorithms = harness.clientKeyExchangeAlgorithms
+        if let schemes = harness.clientTransportProtectionSchemes {
+            clientConfiguration.transportProtectionSchemes = schemes
+        }
         var serverConfiguration = SSHServerConfiguration(
             hostKeys: harness.serverHostKeys,
             userAuthDelegate: harness.serverAuthDelegate,
@@ -99,6 +102,9 @@ class BackToBackEmbeddedChannel {
             banner: harness.serverAuthBanner
         )
         serverConfiguration.keyExchangeAlgorithms = harness.serverKeyExchangeAlgorithms
+        if let schemes = harness.serverTransportProtectionSchemes {
+            serverConfiguration.transportProtectionSchemes = schemes
+        }
         let clientHandler = NIOSSHHandler(
             role: .client(clientConfiguration),
             allocator: self.client.allocator,
@@ -163,6 +169,10 @@ struct TestHarness {
     var clientKeyExchangeAlgorithms: [String]?
 
     var serverKeyExchangeAlgorithms: [String]?
+
+    var clientTransportProtectionSchemes: [NIOSSHTransportProtection.Type]?
+
+    var serverTransportProtectionSchemes: [NIOSSHTransportProtection.Type]?
 }
 
 final class UserEventExpecter: ChannelInboundHandler {
