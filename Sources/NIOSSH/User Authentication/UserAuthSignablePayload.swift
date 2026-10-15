@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 import NIOCore
@@ -32,7 +34,21 @@ import NIOCore
 internal struct UserAuthSignablePayload {
     private(set) var bytes: ByteBuffer
 
-    init(sessionIdentifier: ByteBuffer, userName: String, serviceName: String, publicKey: NIOSSHPublicKey) {
+    /// For an RSA key, the algorithm named in the payload — and so the one to sign with.
+    private(set) var rsaSignatureAlgorithm: RSASignatureAlgorithm?
+
+    /// - parameters:
+    ///     - rsaSignatureAlgorithm: How an RSA key signs this; ignored for other keys. For an
+    ///       RSA key the algorithm name in the payload is this one, not the key type
+    ///       (RFC 8332 § 3.2); nil means `rsa-sha2-512`.
+    init(
+        sessionIdentifier: ByteBuffer,
+        userName: String,
+        serviceName: String,
+        publicKey: NIOSSHPublicKey,
+        rsaSignatureAlgorithm: RSASignatureAlgorithm? = nil
+    ) {
+        let rsaAlgorithm = publicKey.isRSA ? (rsaSignatureAlgorithm ?? .sha512) : nil
         // We use the session identifier as the base buffer and just append to it. We ask for 1kB because it's likely
         // enough for this data.
         var sessionIdentifier = sessionIdentifier
@@ -45,11 +61,12 @@ internal struct UserAuthSignablePayload {
         newBuffer.writeSSHString(serviceName.utf8)
         newBuffer.writeSSHString("publickey".utf8)
         newBuffer.writeSSHBoolean(true)
-        newBuffer.writeSSHString(publicKey.keyPrefix)
+        newBuffer.writeSSHString(rsaAlgorithm?.name ?? publicKey.keyPrefix)
         newBuffer.writeCompositeSSHString { buffer in
             buffer.writeSSHHostKey(publicKey)
         }
 
         self.bytes = newBuffer
+        self.rsaSignatureAlgorithm = rsaAlgorithm
     }
 }

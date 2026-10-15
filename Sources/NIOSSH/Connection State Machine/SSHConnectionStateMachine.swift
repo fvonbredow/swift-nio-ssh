@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 import NIOCore
@@ -170,7 +172,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .keyExchange(state)
                         return .noMessage
@@ -229,7 +231,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .sentNewKeys(state)
                         return .noMessage
@@ -281,6 +283,12 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
+
+                    case .extensionInfo(let message):
+                        // RFC 8308: the server says which signature algorithms it accepts.
+                        state.userAuthStateMachine.receiveExtensionInfo(message)
+                        self = .receivedNewKeys(state)
+                        return .noMessage
 
                     case .ignore, .debug:
                         // Ignore these
@@ -350,6 +358,12 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
+
+                    case .extensionInfo(let message):
+                        // RFC 8308: the server says which signature algorithms it accepts.
+                        state.userAuthStateMachine.receiveExtensionInfo(message)
+                        self = .userAuthentication(state)
+                        return .noMessage
 
                     case .ignore, .debug:
                         // Ignore these
@@ -421,7 +435,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .active(state)
                         return .noMessage
@@ -463,7 +477,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .receivedKexInitWhenActive(state)
                         return .noMessage
@@ -547,7 +561,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .sentKexInitWhenActive(state)
                         return .noMessage
@@ -597,7 +611,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .rekeying(state)
                         return .noMessage
@@ -678,7 +692,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .rekeyingReceivedNewKeysState(state)
                         return .noMessage
@@ -728,7 +742,7 @@ struct SSHConnectionStateMachine {
                     case .disconnect:
                         self = .receivedDisconnect(state.role)
                         return .disconnect
-                    case .ignore, .debug:
+                    case .ignore, .debug, .extensionInfo:
                         // Ignore these
                         self = .rekeyingSentNewKeysState(state)
                         return .noMessage

@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 import NIOCore
@@ -19,6 +21,11 @@ struct UserAuthenticationStateMachine {
     private var delegate: UserAuthDelegate
     private let loop: EventLoop
     private var sessionID: ByteBuffer
+
+    /// What a client has learned about the server's signature algorithms, and an RSA key
+    /// still being tried with the next of them. A reference, because the offer arrives in a
+    /// future callback that cannot mutate this struct; it is only touched on `loop`.
+    private let rsaNegotiation = RSAAlgorithmNegotiation()
 
     /// The maximum number of `SSH_MSG_USERAUTH_REQUEST` messages this server will process before
     /// disconnecting. Taken from `SSHServerConfiguration`; `.max` for clients, which never enforce it.
@@ -108,6 +115,14 @@ extension UserAuthenticationStateMachine {
         }
     }
 
+    /// The server's SSH_MSG_EXT_INFO (RFC 8308). Only `server-sig-algs` matters here.
+    mutating func receiveExtensionInfo(_ message: SSHMessage.ExtensionInfoMessage) {
+        guard case .client = self.delegate, let algorithms = message.serverSignatureAlgorithms else {
+            return
+        }
+        self.rsaNegotiation.serverSignatureAlgorithms = algorithms
+    }
+
     /// A ServiceAccept message was received from the remote peer.
     mutating func receiveServiceAccept(
         _ message: SSHMessage.ServiceAcceptMessage
@@ -123,7 +138,7 @@ extension UserAuthenticationStateMachine {
 
             // Cool, we can begin the auth dance.
             self.state = .awaitingNextRequest(attempts: 0)
-            return self.requestNextAuthRequest(methods: .all, delegate: delegate)
+            return self.requestNextAuthRequest(methods: .all, partialSuccess: false, delegate: delegate)
         case (.client, .authenticationSucceeded):
             // We should ignore all further auth messages in this state.
             return nil
@@ -241,7 +256,11 @@ extension UserAuthenticationStateMachine {
             // Ok, the server didn't like that much. Let's try another one.
             self.state = .awaitingNextRequest(attempts: attempts)
             precondition(responseCount == 1, "We don't support parallel authentication attempts yet!")
-            return self.requestNextAuthRequest(methods: .init(message), delegate: delegate)
+            return self.requestNextAuthRequest(
+                methods: .init(message),
+                partialSuccess: message.partialSuccess,
+                delegate: delegate
+            )
         case (.client, .authenticationSucceeded):
             // We should ignore all further auth messages in this state.
             return nil
@@ -465,14 +484,41 @@ extension UserAuthenticationStateMachine {
 extension UserAuthenticationStateMachine {
     fileprivate func requestNextAuthRequest(
         methods: NIOSSHAvailableUserAuthenticationMethods,
+        partialSuccess: Bool,
         delegate: NIOSSHClientUserAuthenticationDelegate
     ) -> EventLoopFuture<SSHMessage.UserAuthRequestMessage?> {
+        let negotiation = self.rsaNegotiation
+
+        // An RSA key the server just refused may only have been refused for its algorithm:
+        // a server that did not say which it accepts gets the next one before the delegate
+        // is asked for anything else. Not after a partial success — that refusal was not one.
+        if !partialSuccess, methods.contains(.publicKey), let (offer, algorithm) = negotiation.nextRetry() {
+            do {
+                let message = try SSHMessage.UserAuthRequestMessage(
+                    request: offer,
+                    sessionID: self.sessionID,
+                    rsaSignatureAlgorithm: algorithm
+                )
+                return self.loop.makeSucceededFuture(message)
+            } catch {
+                return self.loop.makeFailedFuture(error)
+            }
+        }
+        negotiation.abandonRetry()
+
         let promise = self.loop.makePromise(of: NIOSSHUserAuthenticationOffer?.self)
         delegate.nextAuthenticationType(availableMethods: methods, nextChallengePromise: promise)
 
         // The explicit capture list is here to force a copy of the buffer, rather than capturing self.
         return promise.futureResult.flatMapThrowing { [sessionID = self.sessionID] request in
-            try request.map { try SSHMessage.UserAuthRequestMessage(request: $0, sessionID: sessionID) }
+            try request.map { offer in
+                let algorithm = negotiation.firstAlgorithm(for: offer)
+                return try SSHMessage.UserAuthRequestMessage(
+                    request: offer,
+                    sessionID: sessionID,
+                    rsaSignatureAlgorithm: algorithm
+                )
+            }
         }
     }
 }
@@ -505,7 +551,8 @@ extension UserAuthenticationStateMachine {
                 sessionIdentifier: sessionID,
                 userName: request.username,
                 serviceName: request.service,
-                publicKey: key
+                publicKey: key,
+                rsaSignatureAlgorithm: signature.rsaAlgorithm
             )
             let supportedMethods = delegate.supportedAuthenticationMethods
 
@@ -554,5 +601,49 @@ extension UserAuthenticationStateMachine {
                 .init(outcome, supportedMethods: supportedMethods)
             }
         }
+    }
+}
+
+// MARK: RSA signature algorithm negotiation (client)
+
+/// Which algorithm a client's RSA key signs with, and the retries when the server never said.
+///
+/// RFC 8332 gives an `ssh-rsa` key three algorithms. A server that sends `server-sig-algs`
+/// (RFC 8308) tells us which it takes and gets exactly that one. One that does not — older
+/// OpenSSH, a lot of network equipment — gets `rsa-sha2-512`, and if that is refused the same
+/// key again with `rsa-sha2-256`, then `ssh-rsa`, before the delegate is asked for anything
+/// else. That costs at most two refusals, and only for an RSA key on such a server.
+///
+/// Confined to the connection's event loop; `@unchecked` because futures want `Sendable`.
+final class RSAAlgorithmNegotiation: @unchecked Sendable {
+    var serverSignatureAlgorithms: [Substring]?
+
+    private var retry: (offer: NIOSSHUserAuthenticationOffer, remaining: [RSASignatureAlgorithm])?
+
+    /// The algorithm to sign a fresh offer with; nil when it is not an RSA key.
+    func firstAlgorithm(for offer: NIOSSHUserAuthenticationOffer) -> RSASignatureAlgorithm? {
+        guard case .privateKey(let key) = offer.offer, key.publicKey.isRSA else {
+            self.retry = nil
+            return nil
+        }
+        var candidates = RSASignatureAlgorithm.candidates(serverSignatureAlgorithms: self.serverSignatureAlgorithms)
+        let first = candidates.removeFirst()
+        self.retry = candidates.isEmpty ? nil : (offer, candidates)
+        return first
+    }
+
+    /// The same RSA key with its next algorithm, if one is left.
+    func nextRetry() -> (NIOSSHUserAuthenticationOffer, RSASignatureAlgorithm)? {
+        guard var pending = self.retry, !pending.remaining.isEmpty else {
+            self.retry = nil
+            return nil
+        }
+        let next = pending.remaining.removeFirst()
+        self.retry = pending.remaining.isEmpty ? nil : pending
+        return (pending.offer, next)
+    }
+
+    func abandonRetry() {
+        self.retry = nil
     }
 }

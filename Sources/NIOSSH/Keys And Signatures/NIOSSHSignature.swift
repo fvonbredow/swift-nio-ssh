@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 @preconcurrency import Crypto
@@ -42,6 +44,9 @@ extension NIOSSHSignature {
 
         case ecdsaP521(P521.Signing.ECDSASignature)
 
+        /// `rsa-sha2-512`, `rsa-sha2-256` or `ssh-rsa`, depending on the algorithm inside.
+        case rsa(RSASignature)
+
         internal enum RawBytes {
             case byteBuffer(ByteBuffer)
             case data(Data)
@@ -59,6 +64,33 @@ extension NIOSSHSignature {
 
     /// The prefix of a P521 ECDSA public key.
     fileprivate static let ecdsaP521SignaturePrefix = "ecdsa-sha2-nistp521".utf8
+
+    /// The hash an RSA signature was made with; nil for every other kind.
+    internal var rsaAlgorithm: RSASignatureAlgorithm? {
+        if case .rsa(let signature) = self.backingSignature {
+            return signature.algorithm
+        }
+        return nil
+    }
+
+    /// The signature algorithm, as it is written in front of the signature.
+    ///
+    /// For every key but RSA this is fixed by the key type. An RSA key signs with one of three,
+    /// and the one used has to match what was negotiated or requested.
+    internal var algorithmName: String.UTF8View {
+        switch self.backingSignature {
+        case .ed25519:
+            return Self.ed25519SignaturePrefix
+        case .ecdsaP256:
+            return Self.ecdsaP256SignaturePrefix
+        case .ecdsaP384:
+            return Self.ecdsaP384SignaturePrefix
+        case .ecdsaP521:
+            return Self.ecdsaP521SignaturePrefix
+        case .rsa(let signature):
+            return signature.algorithm.name
+        }
+    }
 }
 
 extension NIOSSHSignature.BackingSignature.RawBytes: Equatable {
@@ -93,10 +125,13 @@ extension NIOSSHSignature.BackingSignature: Equatable {
             return lhs.rawRepresentation == rhs.rawRepresentation
         case (.ecdsaP521(let lhs), .ecdsaP521(let rhs)):
             return lhs.rawRepresentation == rhs.rawRepresentation
+        case (.rsa(let lhs), .rsa(let rhs)):
+            return lhs == rhs
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
-            (.ecdsaP521, _):
+            (.ecdsaP521, _),
+            (.rsa, _):
             return false
         }
     }
@@ -117,6 +152,9 @@ extension NIOSSHSignature.BackingSignature: Hashable {
         case .ecdsaP521(let sig):
             hasher.combine(3)
             hasher.combine(sig.rawRepresentation)
+        case .rsa(let sig):
+            hasher.combine(4)
+            hasher.combine(sig)
         }
     }
 }
@@ -134,6 +172,12 @@ extension ByteBuffer {
             return self.writeECDSAP384Signature(baseSignature: sig)
         case .ecdsaP521(let sig):
             return self.writeECDSAP521Signature(baseSignature: sig)
+        case .rsa(let sig):
+            // RFC 8332 § 3: the algorithm name, then the signature as a plain string —
+            // not an mpint, and exactly as long as the modulus.
+            var writtenLength = self.writeSSHString(sig.algorithm.name)
+            writtenLength += self.writeSSHString(sig.bytes)
+            return writtenLength
         }
     }
 
@@ -229,6 +273,13 @@ extension ByteBuffer {
                 return try buffer.readECDSAP384Signature()
             } else if bytesView.elementsEqual(NIOSSHSignature.ecdsaP521SignaturePrefix) {
                 return try buffer.readECDSAP521Signature()
+            } else if let algorithm = RSASignatureAlgorithm(name: bytesView) {
+                guard let signatureBytes = buffer.readSSHString() else {
+                    return nil
+                }
+                return NIOSSHSignature(
+                    backingSignature: .rsa(RSASignature(algorithm: algorithm, bytes: Array(signatureBytes.readableBytesView)))
+                )
             } else {
                 // We don't know this signature type.
                 let signature =

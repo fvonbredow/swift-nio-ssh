@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 import NIOCore
@@ -29,6 +31,7 @@ enum SSHMessage: Equatable {
     case debug(DebugMessage)
     case serviceRequest(ServiceRequestMessage)
     case serviceAccept(ServiceAcceptMessage)
+    case extensionInfo(ExtensionInfoMessage)
     case keyExchange(KeyExchangeMessage)
     case keyExchangeInit(KeyExchangeECDHInitMessage)
     case keyExchangeReply(KeyExchangeECDHReplyMessage)
@@ -136,6 +139,32 @@ extension SSHMessage {
         var publicKey: ByteBuffer
         // the signature on the exchange hash
         var signature: NIOSSHSignature
+    }
+
+    /// SSH_MSG_EXT_INFO (RFC 8308): what a peer tells the other once keys are in place.
+    ///
+    /// The one extension NIOSSH reads is `server-sig-algs`: the signature algorithms the
+    /// server accepts in user authentication — which, for an RSA key, decides between
+    /// `rsa-sha2-512`, `rsa-sha2-256` and `ssh-rsa`.
+    struct ExtensionInfoMessage: Equatable {
+        static let id: UInt8 = 7
+
+        struct Extension: Equatable {
+            var name: String
+            var value: ByteBuffer
+        }
+
+        var extensions: [Extension]
+
+        /// The comma-separated `server-sig-algs` list, if the server sent one.
+        var serverSignatureAlgorithms: [Substring]? {
+            guard var value = self.extensions.first(where: { $0.name == "server-sig-algs" })?.value,
+                let list = value.readString(length: value.readableBytes)
+            else {
+                return nil
+            }
+            return list.split(separator: ",")
+        }
     }
 
     struct UserAuthRequestMessage: Equatable {
@@ -402,6 +431,11 @@ extension ByteBuffer {
                     return nil
                 }
                 return .serviceAccept(message)
+            case SSHMessage.ExtensionInfoMessage.id:
+                guard let message = try self.readExtensionInfoMessage() else {
+                    return nil
+                }
+                return .extensionInfo(message)
             case SSHMessage.KeyExchangeMessage.id:
                 guard let message = self.readKeyExchangeMessage() else {
                     return nil
@@ -511,6 +545,28 @@ extension ByteBuffer {
             default:
                 throw SSHMessage.ParsingError.unknownType(type)
             }
+        }
+    }
+
+    mutating func readExtensionInfoMessage() throws -> SSHMessage.ExtensionInfoMessage? {
+        try self.rewindOnNilOrError { `self` in
+            guard let count = self.readInteger(as: UInt32.self) else {
+                return nil
+            }
+            // Each extension takes at least eight bytes; a count the packet cannot hold is
+            // not worth reserving memory for.
+            guard Int(count) <= self.readableBytes / 8 else {
+                throw NIOSSHError.invalidSSHMessage(reason: "EXT_INFO claims \(count) extensions")
+            }
+            var extensions: [SSHMessage.ExtensionInfoMessage.Extension] = []
+            extensions.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let name = self.readSSHStringAsString(), let value = self.readSSHString() else {
+                    return nil
+                }
+                extensions.append(.init(name: name, value: value))
+            }
+            return SSHMessage.ExtensionInfoMessage(extensions: extensions)
         }
     }
 
@@ -687,14 +743,13 @@ extension ByteBuffer {
                     return nil
                 }
 
-                if NIOSSHPublicKey.knownAlgorithms.contains(where: { $0.elementsEqual(algorithmName.readableBytesView) }
-                ) {
+                if let expectedKeyType = NIOSSHPublicKey.keyPrefix(forAlgorithm: algorithmName.readableBytesView) {
                     // This is a known algorithm, we can load the key.
                     guard let publicKey = try keyBytes.readSSHHostKey() else {
                         return nil
                     }
 
-                    guard algorithmName.readableBytesView.elementsEqual(publicKey.keyPrefix) else {
+                    guard publicKey.keyPrefix.elementsEqual(expectedKeyType) else {
                         throw NIOSSHError.invalidSSHMessage(reason: "algorithm and key mismatch in user auth request")
                     }
 
@@ -703,6 +758,14 @@ extension ByteBuffer {
                             let signature = try signatureBytes.readSSHSignature()
                         else {
                             return nil
+                        }
+
+                        // RFC 8332 § 3.2: an RSA signature is made with the algorithm the
+                        // request names, and that algorithm is part of what was signed.
+                        if publicKey.isRSA,
+                            !signature.algorithmName.elementsEqual(algorithmName.readableBytesView)
+                        {
+                            throw NIOSSHError.invalidSSHMessage(reason: "RSA signature algorithm differs from the request")
                         }
 
                         method = .publicKey(.known(key: publicKey, signature: signature))
@@ -761,7 +824,7 @@ extension ByteBuffer {
                 return nil
             }
 
-            guard NIOSSHPublicKey.knownAlgorithms.contains(where: { $0.elementsEqual(publicKeyType.readableBytesView) })
+            guard let expectedKeyType = NIOSSHPublicKey.keyPrefix(forAlgorithm: publicKeyType.readableBytesView)
             else {
                 throw NIOSSHError.invalidSSHMessage(reason: "unsupported key type in PK_OK")
             }
@@ -771,7 +834,7 @@ extension ByteBuffer {
             }
 
             // Validate consistency here.
-            guard publicKeyType.readableBytesView.elementsEqual(publicKey.keyPrefix) else {
+            guard publicKey.keyPrefix.elementsEqual(expectedKeyType) else {
                 throw NIOSSHError.invalidSSHMessage(reason: "inconsistent key type")
             }
 
@@ -1198,6 +1261,13 @@ extension ByteBuffer {
         case .serviceRequest(let message):
             writtenBytes += self.writeInteger(SSHMessage.ServiceRequestMessage.id)
             writtenBytes += self.writeServiceRequestMessage(message)
+        case .extensionInfo(let message):
+            writtenBytes += self.writeInteger(SSHMessage.ExtensionInfoMessage.id)
+            writtenBytes += self.writeInteger(UInt32(message.extensions.count))
+            for var extensionInfo in message.extensions {
+                writtenBytes += self.writeSSHString(extensionInfo.name.utf8)
+                writtenBytes += self.writeSSHString(&extensionInfo.value)
+            }
         case .serviceAccept(let message):
             writtenBytes += self.writeInteger(SSHMessage.ServiceAcceptMessage.id)
             writtenBytes += self.writeServiceAcceptMessage(message)
@@ -1373,7 +1443,12 @@ extension ByteBuffer {
         case .publicKey(.known(key: let key, signature: let signature)):
             writtenBytes += self.writeSSHString("publickey".utf8)
             writtenBytes += self.writeSSHBoolean(signature != nil)
-            writtenBytes += self.writeSSHString(key.keyPrefix)
+            // For an RSA key the algorithm is the signature's (RFC 8332), not the key type.
+            if key.isRSA, let signature = signature {
+                writtenBytes += self.writeSSHString(signature.algorithmName)
+            } else {
+                writtenBytes += self.writeSSHString(key.keyPrefix)
+            }
             writtenBytes += self.writeCompositeSSHString { buffer in
                 buffer.writeSSHHostKey(key)
             }

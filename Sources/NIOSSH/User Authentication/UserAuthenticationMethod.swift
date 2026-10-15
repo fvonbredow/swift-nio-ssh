@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 import NIOCore
 
@@ -235,7 +237,13 @@ extension NIOSSHUserAuthenticationOffer.Offer {
 }
 
 extension SSHMessage.UserAuthRequestMessage {
-    init(request: NIOSSHUserAuthenticationOffer, sessionID: ByteBuffer) throws {
+    /// - parameters:
+    ///     - rsaSignatureAlgorithm: How an RSA key signs this request; ignored for other keys.
+    init(
+        request: NIOSSHUserAuthenticationOffer,
+        sessionID: ByteBuffer,
+        rsaSignatureAlgorithm: RSASignatureAlgorithm? = nil
+    ) throws {
         // We only ever ask for the ssh-connection service.
         self.username = request.username
         self.service = "ssh-connection"
@@ -246,7 +254,8 @@ extension SSHMessage.UserAuthRequestMessage {
                 sessionIdentifier: sessionID,
                 userName: self.username,
                 serviceName: self.service,
-                publicKey: privateKeyRequest.publicKey
+                publicKey: privateKeyRequest.publicKey,
+                rsaSignatureAlgorithm: rsaSignatureAlgorithm
             )
             let signature = try privateKeyRequest.privateKey.sign(dataToSign)
             self.method = .publicKey(.known(key: privateKeyRequest.publicKey, signature: signature))

@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 import Crypto
@@ -253,8 +255,9 @@ final class HostKeyTests: XCTestCase {
     }
 
     func testUnrecognisedKey() throws {
+        // NEOS fork: was ssh-rsa, which this fork reads. DSA it does not.
         var buffer = ByteBufferAllocator().buffer(capacity: 1024)
-        buffer.writeSSHString("ssh-rsa".utf8)
+        buffer.writeSSHString("ssh-dss".utf8)
 
         XCTAssertThrowsError(try buffer.readSSHHostKey()) { error in
             XCTAssertEqual((error as? NIOSSHError).map { $0.type }, .unknownPublicKey)
@@ -292,8 +295,9 @@ final class HostKeyTests: XCTestCase {
     }
 
     func testUnrecognisedSignature() throws {
+        // NEOS fork: was ssh-rsa, which this fork reads. DSA it does not.
         var buffer = ByteBufferAllocator().buffer(capacity: 1024)
-        buffer.writeSSHString("ssh-rsa".utf8)
+        buffer.writeSSHString("ssh-dss".utf8)
 
         XCTAssertThrowsError(try buffer.readSSHSignature()) { error in
             XCTAssertEqual((error as? NIOSSHError).map { $0.type }, .unknownSignature)

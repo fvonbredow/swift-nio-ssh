@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 /// An error thrown by NIOSSH.
@@ -161,6 +163,11 @@ extension NIOSSHError {
     internal static func invalidCertificate(diagnostics: String) -> NIOSSHError {
         NIOSSHError(type: .invalidCertificate, diagnostics: diagnostics)
     }
+
+    @inline(never)
+    internal static func invalidRSAKey(reason: String) -> NIOSSHError {
+        NIOSSHError(type: .invalidRSAKey, diagnostics: reason)
+    }
 }
 
 // MARK: - NIOSSHError CustomStringConvertible conformance.
@@ -207,6 +214,7 @@ extension NIOSSHError {
             case invalidHostKeyForKeyExchange
             case invalidOpenSSHPublicKey
             case invalidCertificate
+            case invalidRSAKey
         }
 
         private var base: Base
@@ -304,6 +312,9 @@ extension NIOSSHError {
 
         /// A certificate failed validation.
         public static let invalidCertificate: ErrorType = .init(.invalidCertificate)
+
+        /// An RSA key could not be used: too small, inconsistent, or not an RSA key at all.
+        public static let invalidRSAKey: ErrorType = .init(.invalidRSAKey)
     }
 }
 

@@ -10,6 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
+// Modified for NEOS (2026): RSA keys and signatures (RFC 8332), SSH_MSG_EXT_INFO (RFC 8308).
+//
 //===----------------------------------------------------------------------===//
 
 import Crypto
@@ -127,9 +129,17 @@ struct SSHKeyExchangeStateMachine {
         let encryptionAlgorithms = self.supportedEncryptionAlgorithms
         let macAlgorithms = self.supportedMacAlgorithms
 
+        // RFC 8308: a client asks for SSH_MSG_EXT_INFO by listing this pseudo-algorithm, in
+        // its first key exchange only. It is never negotiated — no server lists it — and
+        // goes last so it cannot be mistaken for a guess.
+        var keyExchangeAlgorithms = Self.supportedKeyExchangeAlgorithms
+        if self.role.isClient, self.previousSessionIdentifier == nil {
+            keyExchangeAlgorithms.append(Self.extensionInfoClientIndicator)
+        }
+
         return .init(
             cookie: rng.randomCookie(allocator: self.allocator),
-            keyExchangeAlgorithms: Self.supportedKeyExchangeAlgorithms,
+            keyExchangeAlgorithms: keyExchangeAlgorithms,
             serverHostKeyAlgorithms: self.supportedHostKeyAlgorithms,
             encryptionAlgorithmsClientToServer: encryptionAlgorithms,
             encryptionAlgorithmsServerToClient: encryptionAlgorithms,
@@ -255,6 +265,7 @@ struct SSHKeyExchangeStateMachine {
                 let (result, reply) = try exchanger.completeKeyExchangeServerSide(
                     clientKeyExchangeMessage: message,
                     serverHostKey: negotiated.negotiatedHostKey(configuration.hostKeys),
+                    hostKeyAlgorithm: negotiated.negotiatedHostKeyAlgorithm,
                     initialExchangeBytes: &self.initialExchangeBytes,
                     allocator: self.allocator,
                     expectedKeySizes: negotiated.negotiatedProtection.keySizes
@@ -289,10 +300,20 @@ struct SSHKeyExchangeStateMachine {
         case .keyExchangeInitSent(exchange: var exchanger, let negotiated):
             switch self.role {
             case .client:
-                guard message.hostKey.keyPrefix.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8) else {
+                guard message.hostKey.supportsHostKeyAlgorithm(negotiated.negotiatedHostKeyAlgorithm) else {
                     throw NIOSSHError.invalidHostKeyForKeyExchange(
                         expected: negotiated.negotiatedHostKeyAlgorithm,
                         got: message.hostKey.keyPrefix
+                    )
+                }
+
+                // The signature has to be made with the negotiated algorithm as well. For most
+                // keys the key type settles that; an RSA key could otherwise answer with SHA-1
+                // after SHA-2 was agreed (RFC 8332 § 3).
+                guard message.signature.algorithmName.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8) else {
+                    throw NIOSSHError.invalidHostKeyForKeyExchange(
+                        expected: negotiated.negotiatedHostKeyAlgorithm,
+                        got: message.signature.algorithmName
                     )
                 }
 
@@ -600,10 +621,18 @@ extension SSHKeyExchangeStateMachine {
         $0.keyExchangeAlgorithmNames
     }
 
-    /// All known host key algorithms.
+    /// All known host key algorithms, in the order a client prefers them.
+    ///
+    /// RSA comes after the curves, so a server that has both keeps being identified by the
+    /// key it was identified by before. `ssh-rsa` (SHA-1) is last: it is chosen only when the
+    /// server offers nothing else, which is the case for a lot of older network equipment.
     static let supportedServerHostKeyAlgorithms: [Substring] = [
         "ssh-ed25519", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp521",
+        "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa",
     ]
+
+    /// RFC 8308's request for SSH_MSG_EXT_INFO.
+    static let extensionInfoClientIndicator: Substring = "ext-info-c"
 }
 
 extension SSHKeyExchangeStateMachine {
