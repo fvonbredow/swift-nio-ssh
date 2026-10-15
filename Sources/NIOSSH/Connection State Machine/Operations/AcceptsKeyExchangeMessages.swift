@@ -23,6 +23,8 @@ extension AcceptsKeyExchangeMessages {
         _ message: SSHMessage.KeyExchangeMessage
     ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
         let message = try self.keyExchangeStateMachine.handle(keyExchange: message)
+        // The negotiation is done: a client in a group exchange reads 31 as the group next.
+        self.parser.expectsGroupExchangeGroup = self.keyExchangeStateMachine.awaitsGroupExchangeGroup
 
         if let message = message {
             return .emitMessage(message)
@@ -48,6 +50,14 @@ extension AcceptsKeyExchangeMessages {
     ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
         let message = try self.keyExchangeStateMachine.handle(keyExchangeReply: message)
         return .possibleFutureMessage(message)
+    }
+
+    mutating func receiveGroupExchangeGroupMessage(
+        _ message: SSHMessage.KeyExchangeDHGEXGroupMessage
+    ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
+        self.parser.expectsGroupExchangeGroup = false
+        let reply = try self.keyExchangeStateMachine.handle(groupExchangeGroup: message)
+        return .emitMessage(reply)
     }
 
     mutating func receiveNewKeysMessage() throws {

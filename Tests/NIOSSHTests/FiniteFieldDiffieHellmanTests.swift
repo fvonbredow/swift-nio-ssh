@@ -262,6 +262,53 @@ final class FiniteFieldDiffieHellmanTests: XCTestCase {
         }
     }
 
+    func testGroupExchangeConnectsEndToEndAndRekeys() throws {
+        for name in ["diffie-hellman-group-exchange-sha256", "diffie-hellman-group-exchange-sha1"] {
+            let channel = BackToBackEmbeddedChannel()
+            var harness = TestHarness()
+            harness.clientKeyExchangeAlgorithms = [name]
+            harness.serverKeyExchangeAlgorithms = [name]
+            XCTAssertNoThrow(try channel.configureWithHarness(harness), name)
+            XCTAssertNoThrow(try channel.activate(), name)
+            XCTAssertNoThrow(try channel.interactInMemory(), name)
+            XCTAssertNoThrow(try channel.clientSSHHandler!._rekey(), name)
+            XCTAssertNoThrow(try channel.interactInMemory(), name)
+            XCTAssertNoThrow(_ = try channel.createNewChannel(), name)
+            XCTAssertNoThrow(try channel.interactInMemory(), name)
+            XCTAssertEqual(channel.activeServerChannels.count, 1, name)
+            try? channel.finish()
+        }
+    }
+
+    func testAGroupOutsideTheRequestIsRefused() throws {
+        var exchange = FiniteFieldGroupExchange<GroupExchangeSHA256>(
+            ourRole: .client(.init(userAuthDelegate: InfinitePasswordDelegate(), serverAuthDelegate: AcceptAllHostKeysDelegate())),
+            previousSessionIdentifier: nil
+        )
+        // 512 bits: below the 1024 a client asks for at least.
+        var small = [UInt8](repeating: 0xFF, count: 64)
+        small[0] = 0x7F
+        XCTAssertThrowsError(
+            try exchange.receiveGroupExchangeGroup(.init(prime: ByteBuffer(bytes: small), generator: ByteBuffer(bytes: [2])))
+        )
+        // An even "prime", and a generator of 1.
+        XCTAssertThrowsError(
+            try exchange.receiveGroupExchangeGroup(
+                .init(prime: ByteBuffer(bytes: [0x00] + [UInt8](repeating: 0xFE, count: 256)), generator: ByteBuffer(bytes: [2]))
+            )
+        )
+        XCTAssertThrowsError(
+            try exchange.receiveGroupExchangeGroup(
+                .init(prime: ByteBuffer(bytes: [0x00] + DiffieHellmanPrimes.modp2048), generator: ByteBuffer(bytes: [1]))
+            )
+        )
+        XCTAssertNoThrow(
+            try exchange.receiveGroupExchangeGroup(
+                .init(prime: ByteBuffer(bytes: [0x00] + DiffieHellmanPrimes.modp2048), generator: ByteBuffer(bytes: [2]))
+            )
+        )
+    }
+
     func testGroup18AgreesOnASecret() throws {
         typealias DH = FiniteFieldDiffieHellman<DiffieHellmanGroup18SHA512>
         let modulus = DiffieHellmanGroup18SHA512.modulus

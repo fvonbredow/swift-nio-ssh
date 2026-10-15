@@ -48,6 +48,30 @@ protocol EllipticCurveKeyExchangeProtocol: _NIOSSHSendableMetatype {
     ) throws -> KeyExchangeResult
 
     static var keyExchangeAlgorithmNames: [Substring] { get }
+
+    /// Group exchange only (RFC 4419): the server picks a group for the client's request…
+    mutating func receiveGroupExchangeRequest(
+        _ message: SSHMessage.KeyExchangeECDHInitMessage
+    ) throws -> SSHMessage.KeyExchangeDHGEXGroupMessage
+
+    /// …and the client answers the group with its own value.
+    mutating func receiveGroupExchangeGroup(
+        _ message: SSHMessage.KeyExchangeDHGEXGroupMessage
+    ) throws -> SSHMessage.KeyExchangeECDHInitMessage
+}
+
+extension EllipticCurveKeyExchangeProtocol {
+    mutating func receiveGroupExchangeRequest(
+        _ message: SSHMessage.KeyExchangeECDHInitMessage
+    ) throws -> SSHMessage.KeyExchangeDHGEXGroupMessage {
+        throw NIOSSHError.protocolViolation(protocolName: "key exchange", violation: "group exchange request")
+    }
+
+    mutating func receiveGroupExchangeGroup(
+        _ message: SSHMessage.KeyExchangeDHGEXGroupMessage
+    ) throws -> SSHMessage.KeyExchangeECDHInitMessage {
+        throw NIOSSHError.protocolViolation(protocolName: "key exchange", violation: "group exchange group")
+    }
 }
 
 struct EllipticCurveKeyExchange<PrivateKey: ECDHCompatiblePrivateKey>: EllipticCurveKeyExchangeProtocol {

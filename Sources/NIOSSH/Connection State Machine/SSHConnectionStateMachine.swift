@@ -177,6 +177,10 @@ struct SSHConnectionStateMachine {
                         let result = try state.receiveKeyExchangeReplyMessage(message)
                         self = .keyExchange(state)
                         return result
+                    case .keyExchangeDHGEXGroup(let message):
+                        let result = try state.receiveGroupExchangeGroupMessage(message)
+                        self = .keyExchange(state)
+                        return result
                     case .newKeys:
                         try state.receiveNewKeysMessage()
                         self = .receivedNewKeys(.init(keyExchangeState: state, loop: loop))
@@ -243,6 +247,10 @@ struct SSHConnectionStateMachine {
                         return result
                     case .keyExchangeReply(let message):
                         let result = try state.receiveKeyExchangeReplyMessage(message)
+                        self = .sentNewKeys(state)
+                        return result
+                    case .keyExchangeDHGEXGroup(let message):
+                        let result = try state.receiveGroupExchangeGroupMessage(message)
                         self = .sentNewKeys(state)
                         return result
                     case .newKeys:
@@ -630,6 +638,10 @@ struct SSHConnectionStateMachine {
                         let result = try state.receiveKeyExchangeReplyMessage(message)
                         self = .rekeying(state)
                         return result
+                    case .keyExchangeDHGEXGroup(let message):
+                        let result = try state.receiveGroupExchangeGroupMessage(message)
+                        self = .rekeying(state)
+                        return result
                     case .newKeys:
                         try state.receiveNewKeysMessage()
                         let newState = RekeyingReceivedNewKeysState(state)
@@ -761,6 +773,10 @@ struct SSHConnectionStateMachine {
                         let result = try state.receiveKeyExchangeReplyMessage(message)
                         self = .rekeyingSentNewKeysState(state)
                         return result
+                    case .keyExchangeDHGEXGroup(let message):
+                        let result = try state.receiveGroupExchangeGroupMessage(message)
+                        self = .rekeyingSentNewKeysState(state)
+                        return result
                     case .newKeys:
                         try state.receiveNewKeysMessage()
                         let newState = ActiveState(state)
@@ -881,6 +897,9 @@ struct SSHConnectionStateMachine {
             case .keyExchangeReply(let kexReply):
                 try kex.writeKeyExchangeReplyMessage(kexReply, into: &buffer)
                 self.state = .keyExchange(kex)
+            case .keyExchangeDHGEXGroup(let group):
+                try kex.writeGroupExchangeGroupMessage(group, into: &buffer)
+                self.state = .keyExchange(kex)
             case .newKeys:
                 try kex.writeNewKeysMessage(into: &buffer)
                 let newState = SentNewKeysState(keyExchangeState: kex, loop: loop)
@@ -922,6 +941,9 @@ struct SSHConnectionStateMachine {
                 self.state = .receivedNewKeys(kex)
             case .keyExchangeReply(let kexReply):
                 try kex.writeKeyExchangeReplyMessage(kexReply, into: &buffer)
+                self.state = .receivedNewKeys(kex)
+            case .keyExchangeDHGEXGroup(let group):
+                try kex.writeGroupExchangeGroupMessage(group, into: &buffer)
                 self.state = .receivedNewKeys(kex)
             case .newKeys:
                 try kex.writeNewKeysMessage(into: &buffer)
@@ -1128,6 +1150,9 @@ struct SSHConnectionStateMachine {
             case .keyExchangeReply(let kexReply):
                 try state.writeKeyExchangeReplyMessage(kexReply, into: &buffer)
                 self.state = .rekeying(state)
+            case .keyExchangeDHGEXGroup(let group):
+                try state.writeGroupExchangeGroupMessage(group, into: &buffer)
+                self.state = .rekeying(state)
             case .newKeys:
                 try state.writeNewKeysMessage(into: &buffer)
                 self.state = .rekeyingSentNewKeysState(.init(state))
@@ -1158,6 +1183,9 @@ struct SSHConnectionStateMachine {
                 self.state = .rekeyingReceivedNewKeysState(state)
             case .keyExchangeReply(let kexReply):
                 try state.writeKeyExchangeReplyMessage(kexReply, into: &buffer)
+                self.state = .rekeyingReceivedNewKeysState(state)
+            case .keyExchangeDHGEXGroup(let group):
+                try state.writeGroupExchangeGroupMessage(group, into: &buffer)
                 self.state = .rekeyingReceivedNewKeysState(state)
             case .newKeys:
                 try state.writeNewKeysMessage(into: &buffer)

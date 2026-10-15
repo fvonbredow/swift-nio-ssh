@@ -35,6 +35,7 @@ enum SSHMessage: Equatable {
     case keyExchange(KeyExchangeMessage)
     case keyExchangeInit(KeyExchangeECDHInitMessage)
     case keyExchangeReply(KeyExchangeECDHReplyMessage)
+    case keyExchangeDHGEXGroup(KeyExchangeDHGEXGroupMessage)
     case newKeys
     case userAuthRequest(UserAuthRequestMessage)
     case userAuthFailure(UserAuthFailureMessage)
@@ -126,6 +127,21 @@ extension SSHMessage {
 
         // Q_C, client's ephemeral public key octet string
         var publicKey: ByteBuffer
+
+        /// NEOS fork: the client's messages of a Diffie-Hellman group exchange (RFC 4419),
+        /// carried as this message because they take its place in the exchange. nil is
+        /// KEX_ECDH_INIT / KEXDH_INIT (30).
+        var groupExchange: GroupExchangeStep? = nil
+
+        enum GroupExchangeStep: Equatable {
+            /// SSH_MSG_KEX_DH_GEX_REQUEST (34): the group sizes acceptable; `publicKey` unused.
+            case request(minimum: UInt32, preferred: UInt32, maximum: UInt32)
+            /// SSH_MSG_KEX_DH_GEX_INIT (32): e, in `publicKey`.
+            case initiation
+        }
+
+        static let groupExchangeRequestID: UInt8 = 34
+        static let groupExchangeInitID: UInt8 = 32
     }
 
     // RFC 5656 § 4
@@ -139,6 +155,21 @@ extension SSHMessage {
         var publicKey: ByteBuffer
         // the signature on the exchange hash
         var signature: NIOSSHSignature
+
+        /// NEOS fork: SSH_MSG_KEX_DH_GEX_REPLY (33), same shape with f in `publicKey`.
+        var isGroupExchange = false
+
+        static let groupExchangeReplyID: UInt8 = 33
+    }
+
+    /// SSH_MSG_KEX_DH_GEX_GROUP (RFC 4419): the group the server chose. It shares number 31
+    /// with KEX_ECDH_REPLY; the parser is told which to expect (NEOS fork).
+    struct KeyExchangeDHGEXGroupMessage: Equatable {
+        static let id: UInt8 = 31
+
+        /// mpint contents.
+        var prime: ByteBuffer
+        var generator: ByteBuffer
     }
 
     /// SSH_MSG_EXT_INFO (RFC 8308): what a peer tells the other once keys are in place.
@@ -394,13 +425,49 @@ extension ByteBuffer {
     ///
     /// This function will consume as many bytes as the message should require. If it cannot read enough bytes,
     /// it will return nil.
-    mutating func readSSHMessage() throws -> SSHMessage? {
+    /// - parameters:
+    ///     - expectingGroupExchangeGroup: read message 31 as KEX_DH_GEX_GROUP rather than
+    ///       KEX_ECDH_REPLY — true while a client waits for the group of a group exchange.
+    mutating func readSSHMessage(expectingGroupExchangeGroup: Bool = false) throws -> SSHMessage? {
         try self.rewindOnNilOrError { `self` in
             guard let type = self.readInteger(as: UInt8.self) else {
                 return nil
             }
 
+            if expectingGroupExchangeGroup, type == SSHMessage.KeyExchangeDHGEXGroupMessage.id {
+                guard let prime = self.readSSHString(), let generator = self.readSSHString() else {
+                    return nil
+                }
+                return .keyExchangeDHGEXGroup(.init(prime: prime, generator: generator))
+            }
+
             switch type {
+            case SSHMessage.KeyExchangeECDHInitMessage.groupExchangeRequestID:
+                guard
+                    let minimum = self.readInteger(as: UInt32.self),
+                    let preferred = self.readInteger(as: UInt32.self),
+                    let maximum = self.readInteger(as: UInt32.self)
+                else {
+                    return nil
+                }
+                return .keyExchangeInit(
+                    .init(
+                        publicKey: ByteBuffer(),
+                        groupExchange: .request(minimum: minimum, preferred: preferred, maximum: maximum)
+                    )
+                )
+            case SSHMessage.KeyExchangeECDHInitMessage.groupExchangeInitID:
+                guard var message = self.readKeyExchangeECDHInitMessage() else {
+                    return nil
+                }
+                message.groupExchange = .initiation
+                return .keyExchangeInit(message)
+            case SSHMessage.KeyExchangeECDHReplyMessage.groupExchangeReplyID:
+                guard var message = try self.readKeyExchangeECDHReplyMessage() else {
+                    return nil
+                }
+                message.isGroupExchange = true
+                return .keyExchangeReply(message)
             case SSHMessage.DisconnectMessage.id:
                 guard let message = self.readDisconnectMessage() else {
                     return nil
@@ -1275,11 +1342,30 @@ extension ByteBuffer {
             writtenBytes += self.writeInteger(SSHMessage.KeyExchangeMessage.id)
             writtenBytes += self.writeKeyExchangeMessage(message)
         case .keyExchangeInit(let message):
-            writtenBytes += self.writeInteger(SSHMessage.KeyExchangeECDHInitMessage.id)
-            writtenBytes += self.writeKeyExchangeECDHInitMessage(message)
+            switch message.groupExchange {
+            case .none:
+                writtenBytes += self.writeInteger(SSHMessage.KeyExchangeECDHInitMessage.id)
+                writtenBytes += self.writeKeyExchangeECDHInitMessage(message)
+            case .some(.request(let minimum, let preferred, let maximum)):
+                writtenBytes += self.writeInteger(SSHMessage.KeyExchangeECDHInitMessage.groupExchangeRequestID)
+                writtenBytes += self.writeInteger(minimum)
+                writtenBytes += self.writeInteger(preferred)
+                writtenBytes += self.writeInteger(maximum)
+            case .some(.initiation):
+                writtenBytes += self.writeInteger(SSHMessage.KeyExchangeECDHInitMessage.groupExchangeInitID)
+                writtenBytes += self.writeKeyExchangeECDHInitMessage(message)
+            }
         case .keyExchangeReply(let message):
-            writtenBytes += self.writeInteger(SSHMessage.KeyExchangeECDHReplyMessage.id)
+            writtenBytes += self.writeInteger(
+                message.isGroupExchange
+                    ? SSHMessage.KeyExchangeECDHReplyMessage.groupExchangeReplyID
+                    : SSHMessage.KeyExchangeECDHReplyMessage.id
+            )
             writtenBytes += self.writeKeyExchangeECDHReplyMessage(message)
+        case .keyExchangeDHGEXGroup(var message):
+            writtenBytes += self.writeInteger(SSHMessage.KeyExchangeDHGEXGroupMessage.id)
+            writtenBytes += self.writeSSHString(&message.prime)
+            writtenBytes += self.writeSSHString(&message.generator)
         case .newKeys:
             writtenBytes += self.writeInteger(21 as UInt8)
         case .userAuthRequest(let message):

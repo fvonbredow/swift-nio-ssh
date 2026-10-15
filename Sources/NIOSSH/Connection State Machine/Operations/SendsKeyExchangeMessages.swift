@@ -45,6 +45,14 @@ extension SendsKeyExchangeMessages {
         try self.serializer.serialize(message: .keyExchangeReply(message), to: &buffer)
     }
 
+    mutating func writeGroupExchangeGroupMessage(
+        _ message: SSHMessage.KeyExchangeDHGEXGroupMessage,
+        into buffer: inout ByteBuffer
+    ) throws {
+        self.keyExchangeStateMachine.send(groupExchangeGroup: message)
+        try self.serializer.serialize(message: .keyExchangeDHGEXGroup(message), to: &buffer)
+    }
+
     mutating func writeNewKeysMessage(into buffer: inout ByteBuffer) throws {
         let result = self.keyExchangeStateMachine.sendNewKeys()
         try self.serializer.serialize(message: .newKeys, to: &buffer)

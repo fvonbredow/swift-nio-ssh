@@ -44,6 +44,10 @@ struct SSHPacketParser {
     private var state: State
     private(set) var sequenceNumber: UInt32
 
+    /// A client in a Diffie-Hellman group exchange waits for KEX_DH_GEX_GROUP, which has the
+    /// number KEX_ECDH_REPLY has otherwise (NEOS fork).
+    var expectsGroupExchangeGroup = false
+
     /// Strict key exchange (Terrapin countermeasure): the sequence number restarts at zero
     /// after every NEWKEYS received.
     private(set) var usesStrictKeyExchange = false
@@ -349,7 +353,7 @@ struct SSHPacketParser {
             buffer.moveReaderIndex(forwardBy: MemoryLayout<UInt32>.size)
 
             var content = try buffer.sliceContentFromPadding()
-            guard let message = try content.readSSHMessage(), content.readableBytes == 0, buffer.readableBytes == 0
+            guard let message = try content.readSSHMessage(expectingGroupExchangeGroup: self.expectsGroupExchangeGroup), content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.
                 throw NIOSSHError.invalidPacketFormat
@@ -366,7 +370,7 @@ struct SSHPacketParser {
             }
 
             var content = try protection.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: self.sequenceNumber)
-            guard let message = try content.readSSHMessage(), content.readableBytes == 0, buffer.readableBytes == 0
+            guard let message = try content.readSSHMessage(expectingGroupExchangeGroup: self.expectsGroupExchangeGroup), content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.
                 throw NIOSSHError.invalidPacketFormat

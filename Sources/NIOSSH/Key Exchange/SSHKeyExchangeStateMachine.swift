@@ -282,6 +282,19 @@ struct SSHKeyExchangeStateMachine {
             case .client:
                 throw SSHKeyExchangeError.unexpectedMessage
             case .server(let configuration):
+                // A group exchange first asks for a group (RFC 4419); the INIT comes after.
+                let isGroupExchange = negotiated.isGroupExchange
+                switch (message.groupExchange, isGroupExchange) {
+                case (.some(.request), true):
+                    let group = try exchanger.receiveGroupExchangeRequest(message)
+                    self.state = .awaitingKeyExchangeInit(exchange: exchanger, negotiated: negotiated)
+                    return SSHMultiMessage(.keyExchangeDHGEXGroup(group))
+                case (.some(.initiation), true), (.none, false):
+                    break
+                default:
+                    throw SSHKeyExchangeError.unexpectedMessage
+                }
+
                 let (result, reply) = try exchanger.completeKeyExchangeServerSide(
                     clientKeyExchangeMessage: message,
                     serverHostKey: negotiated.negotiatedHostKey(configuration.hostKeys),
@@ -306,6 +319,9 @@ struct SSHKeyExchangeStateMachine {
         case .awaitingKeyExchangeInit(exchange: let exchanger, let negotiated):
             precondition(self.role.isClient, "Servers must not send ecdh key exchange init messages")
             self.state = .keyExchangeInitSent(exchange: exchanger, negotiated: negotiated)
+        case .keyExchangeInitSent where message.groupExchange == .initiation:
+            // A group exchange's second client message, after the server's group.
+            precondition(self.role.isClient, "Servers must not send key exchange init messages")
         case .idle, .keyExchangeSent, .keyExchangeReceived, .awaitingKeyExchangeInitInvalidGuess, .keyExchangeInitSent,
             .keyExchangeInitReceived, .keysExchanged, .newKeysSent, .newKeysReceived, .complete:
             // This is a precondition not a throw because we control the sending of this message.
@@ -318,6 +334,9 @@ struct SSHKeyExchangeStateMachine {
     ) throws -> EventLoopFuture<SSHMultiMessage?> {
         switch self.state {
         case .keyExchangeInitSent(exchange: var exchanger, let negotiated):
+            guard message.isGroupExchange == negotiated.isGroupExchange else {
+                throw SSHKeyExchangeError.unexpectedMessage
+            }
             switch self.role {
             case .client:
                 guard message.hostKey.supportsHostKeyAlgorithm(negotiated.negotiatedHostKeyAlgorithm) else {
@@ -386,6 +405,41 @@ struct SSHKeyExchangeStateMachine {
             .complete:
             // This is a precondition not a throw because we control the sending of this message.
             preconditionFailure("Cannot send ECDH key exchange message in state \(self.state)")
+        }
+    }
+
+    /// The client gets the server's group (RFC 4419) and answers with its own value.
+    mutating func handle(groupExchangeGroup message: SSHMessage.KeyExchangeDHGEXGroupMessage) throws -> SSHMultiMessage {
+        switch self.state {
+        case .keyExchangeInitSent(exchange: var exchanger, let negotiated) where self.role.isClient && negotiated.isGroupExchange:
+            let initiation = try exchanger.receiveGroupExchangeGroup(message)
+            self.state = .keyExchangeInitSent(exchange: exchanger, negotiated: negotiated)
+            return SSHMultiMessage(.keyExchangeInit(initiation))
+        default:
+            throw SSHKeyExchangeError.unexpectedMessage
+        }
+    }
+
+    mutating func send(groupExchangeGroup message: SSHMessage.KeyExchangeDHGEXGroupMessage) {
+        switch self.state {
+        case .awaitingKeyExchangeInit(_, let negotiated) where self.role.isServer && negotiated.isGroupExchange:
+            break
+        default:
+            preconditionFailure("Cannot send a group exchange group in state \(self.state)")
+        }
+    }
+
+    /// A client that negotiated a group exchange and has not had the group yet.
+    var awaitsGroupExchangeGroup: Bool {
+        guard self.role.isClient else {
+            return false
+        }
+        switch self.state {
+        case .keyExchangeReceived(_, let negotiated, _), .awaitingKeyExchangeInit(_, let negotiated),
+            .keyExchangeInitSent(_, let negotiated):
+            return negotiated.isGroupExchange
+        default:
+            return false
         }
     }
 
@@ -644,7 +698,9 @@ extension SSHKeyExchangeStateMachine {
         FiniteFieldDiffieHellman<DiffieHellmanGroup16SHA512>.self,
         FiniteFieldDiffieHellman<DiffieHellmanGroup18SHA512>.self,
         FiniteFieldDiffieHellman<DiffieHellmanGroup14SHA256>.self,
+        FiniteFieldGroupExchange<GroupExchangeSHA256>.self,
         FiniteFieldDiffieHellman<DiffieHellmanGroup14SHA1>.self,
+        FiniteFieldGroupExchange<GroupExchangeSHA1>.self,
         FiniteFieldDiffieHellman<DiffieHellmanGroup1SHA1>.self,
     ]
 
@@ -655,7 +711,7 @@ extension SSHKeyExchangeStateMachine {
     /// Offered by a client, which takes them only when a server has nothing better — but not
     /// by a server unless it is configured to: SHA-1 exchange hashes and a 1024-bit group.
     static let legacyKeyExchangeAlgorithms: Set<Substring> = [
-        "diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1",
+        "diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1", "diffie-hellman-group-exchange-sha1",
     ]
 
     static let strictKeyExchangeClientIndicator: Substring = "kex-strict-c-v00@openssh.com"
@@ -737,6 +793,10 @@ extension SSHKeyExchangeStateMachine {
         var negotiatedHostKeyAlgorithm: Substring
 
         var negotiatedProtection: NIOSSHTransportProtection.Type
+
+        var isGroupExchange: Bool {
+            self.negotiatedKeyExchangeAlgorithm.hasPrefix("diffie-hellman-group-exchange-")
+        }
 
         func negotiatedHostKey(_ keys: [NIOSSHPrivateKey]) -> NIOSSHPrivateKey {
             // This force-unwrap is safe: to fail to obtain it is a programming error, as we must have negotiated
